@@ -231,6 +231,12 @@ core::EnumListParameter
                      "Win", "Option", "Cmd"},
                     {"Ctrl", "Alt"});
 
+core::StringParameter
+  keyMappings("KeyMappings",
+              "Key/shortcut mappings in the format 'Source->Target' (one per line or separated by semicolon). "
+              "Example: Control_L+a->Alt_L+Tab",
+              "");
+
 core::BoolParameter
   fullscreenSystemKeys("FullscreenSystemKeys",
                        "Pass special keys (like Alt+Tab) directly to "
@@ -285,6 +291,7 @@ static core::VoidParameter* parameterArray[] = {
   &fullscreenSystemKeys,
   /* Keyboard shortcuts */
   &shortcutModifiers,
+  &keyMappings,
 };
 
 static core::VoidParameter* readOnlyParameterArray[] = {

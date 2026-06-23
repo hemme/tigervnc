@@ -73,6 +73,7 @@ extern core::StringParameter display;
 #endif
 
 extern core::EnumListParameter shortcutModifiers;
+extern core::StringParameter keyMappings;
 
 extern core::BoolParameter fullscreenSystemKeys;
 extern core::BoolParameter alertOnFatalError;

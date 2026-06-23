@@ -28,6 +28,11 @@
 #include "Keyboard.h"
 #include "ShortcutHandler.h"
 
+#include <vector>
+#include <set>
+#include <map>
+#include <string>
+
 class Fl_Menu_Button;
 class Fl_RGB_Image;
 
@@ -42,6 +47,12 @@ public:
 
   Viewport(int w, int h, CConn* cc_);
   ~Viewport();
+
+  void popupContextMenu();
+  void executeMenuAction(int id, bool toggleValue = false);
+#ifdef WIN32
+  void popupNativeContextMenu();
+#endif
 
   // Most efficient format (from Viewport's point of view)
   const rfb::PixelFormat &getPreferredPF();
@@ -101,7 +112,6 @@ private:
   void pushLEDState();
 
   void initContextMenu();
-  void popupContextMenu();
 
   static void handleOptions(void *data);
 
@@ -133,6 +143,24 @@ private:
   Fl_RGB_Image *cursor;
   core::Point cursorHotspot;
   bool cursorIsBlank;
+
+  struct KeyMapping {
+    std::set<uint32_t> sourceKeys;
+    std::vector<uint32_t> targetKeys;
+  };
+  std::vector<KeyMapping> keyMappingsList;
+  std::set<uint32_t> physicalPressedKeysyms;
+  std::map<int, uint32_t> physicalKeyToKeysym;
+  std::set<uint32_t> serverPressedKeysyms;
+  std::map<uint32_t, int> keysymToSentSystemKeyCode;
+  struct PhysicalKeyEvent {
+    int systemKeyCode;
+    uint32_t keyCode;
+  };
+  std::map<uint32_t, PhysicalKeyEvent> keysymToPhysicalEvent;
+
+  void parseKeyMappings();
+  void updateKeyMappingState();
 };
 
 #endif

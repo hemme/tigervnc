@@ -30,6 +30,11 @@ in this Software without prior written authorization from The Open Group.
 #endif
 
 #include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#endif
 
 #include "keysymdef.h"
 #include "KeysymStr.h"
@@ -107,5 +112,62 @@ const char* KeySymName(unsigned keysym)
       return "[unknown keysym]";
 
     return name;
+}
+
+unsigned int StringToKeysym(const char* name)
+{
+    if (name == NULL || name[0] == '\0')
+        return 0;
+
+    // Direct key names aliases for user convenience
+    if (strcasecmp(name, "Ctrl") == 0 || strcasecmp(name, "Control") == 0)
+        name = "Control_L";
+    else if (strcasecmp(name, "Alt") == 0)
+        name = "Alt_L";
+    else if (strcasecmp(name, "Shift") == 0)
+        name = "Shift_L";
+    else if (strcasecmp(name, "Win") == 0 || strcasecmp(name, "Super") == 0 || strcasecmp(name, "Cmd") == 0 || strcasecmp(name, "Command") == 0)
+        name = "Super_L";
+    else if (strcasecmp(name, "Ctrl_R") == 0 || strcasecmp(name, "Control_R") == 0)
+        name = "Control_R";
+    else if (strcasecmp(name, "Alt_R") == 0 || strcasecmp(name, "AltGr") == 0)
+        name = "Mode_switch";
+    else if (strcasecmp(name, "Shift_R") == 0)
+        name = "Shift_R";
+    else if (strcasecmp(name, "Win_R") == 0 || strcasecmp(name, "Super_R") == 0)
+        name = "Super_R";
+
+    // Check if it is a hex code or Unicode code (e.g., U1234 or 0x1234)
+    if (name[0] == 'U' || name[0] == 'u') {
+        char *endptr;
+        unsigned int val = strtoul(name + 1, &endptr, 16);
+        if (*endptr == '\0') {
+            return val | 0x01000000;
+        }
+    }
+    if (name[0] == '0' && (name[1] == 'x' || name[1] == 'X')) {
+        char *endptr;
+        unsigned int val = strtoul(name + 2, &endptr, 16);
+        if (*endptr == '\0') {
+            return val;
+        }
+    }
+
+    size_t p = 1;
+    while (p < sizeof(_XkeyTable)) {
+        unsigned int ks = ((unsigned int)_XkeyTable[p + 2] << 24) |
+                          ((unsigned int)_XkeyTable[p + 3] << 16) |
+                          ((unsigned int)_XkeyTable[p + 4] << 8) |
+                          (unsigned int)_XkeyTable[p + 5];
+        const char* entry_name = (const char*)&_XkeyTable[p + 6];
+        if (strcasecmp(entry_name, name) == 0) {
+            if (ks == 0)
+                return 0xffffff; // XK_VoidSymbol
+            return ks;
+        }
+        size_t len = strlen(entry_name);
+        p += len + 7;
+    }
+    return 0;
 }
 

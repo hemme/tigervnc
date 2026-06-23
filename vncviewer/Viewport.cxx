@@ -56,6 +56,11 @@
 #include "parameters.h"
 #include "vncviewer.h"
 
+#include <sstream>
+#include <algorithm>
+#include <rfb/KeysymStr.h>
+#include <rfb/keysymdef.h>
+
 #include "PlatformPixelBuffer.h"
 
 #include <FL/fl_draw.H>
@@ -67,6 +72,18 @@
 
 #if defined(WIN32)
 #include "KeyboardWin32.h"
+#include <windows.h>
+#include <vector>
+#include <string>
+
+static std::wstring utf8_to_wstring(const char* utf8)
+{
+  int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+  if (len <= 0) return L"";
+  std::vector<wchar_t> buf(len);
+  MultiByteToWideChar(CP_UTF8, 0, utf8, -1, buf.data(), len);
+  return std::wstring(buf.data());
+}
 #elif defined(__APPLE__)
 #include "KeyboardMacOS.h"
 #else
@@ -145,6 +162,8 @@ Viewport::Viewport(int w, int h, CConn* cc_)
 
   // Make sure we have an initial blank cursor set
   setCursor();
+
+  parseKeyMappings();
 }
 
 
@@ -687,132 +706,261 @@ void Viewport::resetKeyboard()
   shortcutBypass = false;
   shortcutActive = false;
   pressedKeys.clear();
+
+  physicalPressedKeysyms.clear();
+  physicalKeyToKeysym.clear();
+  serverPressedKeysyms.clear();
+  keysymToSentSystemKeyCode.clear();
+  keysymToPhysicalEvent.clear();
 }
 
+static std::vector<std::string> splitString(const std::string& s, char delim) {
+  std::vector<std::string> elems;
+  std::stringstream ss(s);
+  std::string item;
+  while (std::getline(ss, item, delim)) {
+    if (!item.empty())
+      elems.push_back(item);
+  }
+  return elems;
+}
+
+static bool parseKeysymList(const std::string& s, std::vector<uint32_t>& outList) {
+  std::vector<std::string> parts = splitString(s, '+');
+  for (const std::string& part : parts) {
+    size_t start = part.find_first_not_of(" \t\r\n");
+    size_t end = part.find_last_not_of(" \t\r\n");
+    if (start == std::string::npos)
+      continue;
+    std::string keyName = part.substr(start, end - start + 1);
+    unsigned int ks = StringToKeysym(keyName.c_str());
+    if (ks == 0) {
+      if (keyName.length() == 1) {
+        ks = (unsigned char)keyName[0];
+      }
+    }
+    if (ks != 0) {
+      outList.push_back(ks);
+    } else {
+      return false;
+    }
+  }
+  return !outList.empty();
+}
+
+void Viewport::parseKeyMappings()
+{
+  keyMappingsList.clear();
+  std::string mappingsStr = (const char*)keyMappings;
+  if (mappingsStr.empty())
+    return;
+
+  std::vector<std::string> rules;
+  std::string currentRule;
+  for (char c : mappingsStr) {
+    if (c == ';' || c == '\n' || c == '\r') {
+      if (!currentRule.empty()) {
+        rules.push_back(currentRule);
+        currentRule.clear();
+      }
+    } else {
+      currentRule.push_back(c);
+    }
+  }
+  if (!currentRule.empty()) {
+    rules.push_back(currentRule);
+  }
+
+  for (const std::string& rule : rules) {
+    size_t arrowPos = rule.find("->");
+    if (arrowPos == std::string::npos)
+      continue;
+    std::string srcStr = rule.substr(0, arrowPos);
+    std::string destStr = rule.substr(arrowPos + 2);
+
+    std::vector<uint32_t> srcList, destList;
+    if (parseKeysymList(srcStr, srcList) && parseKeysymList(destStr, destList)) {
+      KeyMapping km;
+      for (uint32_t k : srcList) km.sourceKeys.insert(k);
+      km.targetKeys = destList;
+      keyMappingsList.push_back(km);
+    }
+  }
+
+  // Sort mappings by sourceKeys.size() descending so that more specific chords match first!
+  std::sort(keyMappingsList.begin(), keyMappingsList.end(),
+            [](const KeyMapping& a, const KeyMapping& b) {
+              return a.sourceKeys.size() > b.sourceKeys.size();
+            });
+}
+
+void Viewport::updateKeyMappingState()
+{
+  std::set<uint32_t> matchedSourceKeys;
+  std::set<uint32_t> desiredServerKeys;
+
+  for (const auto& mapping : keyMappingsList) {
+    bool match = true;
+    for (uint32_t sk : mapping.sourceKeys) {
+      if (physicalPressedKeysyms.find(sk) == physicalPressedKeysyms.end() ||
+          matchedSourceKeys.find(sk) != matchedSourceKeys.end()) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      for (uint32_t sk : mapping.sourceKeys) {
+        matchedSourceKeys.insert(sk);
+      }
+      for (uint32_t tk : mapping.targetKeys) {
+        desiredServerKeys.insert(tk);
+      }
+    }
+  }
+
+  for (uint32_t pk : physicalPressedKeysyms) {
+    if (matchedSourceKeys.find(pk) == matchedSourceKeys.end()) {
+      desiredServerKeys.insert(pk);
+    }
+  }
+
+  // Release keys no longer desired
+  std::vector<uint32_t> keysToRelease;
+  for (uint32_t sk : serverPressedKeysyms) {
+    if (desiredServerKeys.find(sk) == desiredServerKeys.end()) {
+      keysToRelease.push_back(sk);
+    }
+  }
+  for (uint32_t rk : keysToRelease) {
+    auto sentIter = keysymToSentSystemKeyCode.find(rk);
+    if (sentIter != keysymToSentSystemKeyCode.end()) {
+      int systemKeyCode = sentIter->second;
+
+      // Check if physical key and shortcutHandler handles release
+      auto physIter = keysymToPhysicalEvent.find(rk);
+      if (physIter != keysymToPhysicalEvent.end() && !shortcutBypass) {
+        ShortcutHandler::KeyAction action = shortcutHandler.handleKeyRelease(systemKeyCode);
+        if (action == ShortcutHandler::KeyIgnore || action == ShortcutHandler::KeyShortcut) {
+          keysymToSentSystemKeyCode.erase(sentIter);
+          serverPressedKeysyms.erase(rk);
+          continue;
+        }
+        if (action == ShortcutHandler::KeyUnarm) {
+          try {
+            cc->releaseAllKeys();
+          } catch (std::exception& e) {
+            vlog.error("%s", e.what());
+          }
+          DesktopWindow *win = dynamic_cast<DesktopWindow*>(window());
+          assert(win);
+          win->ungrabKeyboard();
+          keysymToSentSystemKeyCode.erase(sentIter);
+          serverPressedKeysyms.erase(rk);
+          continue;
+        }
+      }
+
+      sendKeyRelease(systemKeyCode);
+      keysymToSentSystemKeyCode.erase(sentIter);
+      serverPressedKeysyms.erase(rk);
+    }
+  }
+
+  // Press newly desired keys
+  for (uint32_t dk : desiredServerKeys) {
+    if (serverPressedKeysyms.find(dk) == serverPressedKeysyms.end()) {
+      auto physIter = keysymToPhysicalEvent.find(dk);
+      if (physIter != keysymToPhysicalEvent.end()) {
+        int systemKeyCode = physIter->second.systemKeyCode;
+        uint32_t keyCode = physIter->second.keyCode;
+
+        // Check local shortcut
+        if (!shortcutBypass) {
+          ShortcutHandler::KeyAction action = shortcutHandler.handleKeyPress(systemKeyCode, dk);
+          if (action == ShortcutHandler::KeyIgnore) {
+            continue;
+          }
+          if (action == ShortcutHandler::KeyShortcut) {
+            std::list<uint32_t> keySyms = keyboard->translateToKeySyms(systemKeyCode);
+            uint32_t localSym = NoSymbol;
+            for (auto iter = keySyms.begin(); iter != keySyms.end(); iter++) {
+              bool found;
+              switch (*iter) {
+                case XK_space:
+                case XK_G:
+                case XK_g:
+                case XK_M:
+                case XK_m:
+                case XK_KP_Enter:
+                case XK_Return:
+                  localSym = *iter;
+                  found = true;
+                  break;
+                default:
+                  found = false;
+                  break;
+              }
+              if (found) break;
+            }
+            if (localSym == XK_space) {
+              if (!shortcutActive) {
+                shortcutBypass = true;
+                shortcutHandler.reset();
+              }
+              continue;
+            }
+            shortcutActive = true;
+            try {
+              cc->releaseAllKeys();
+            } catch (std::exception& e) {
+              vlog.error("%s", e.what());
+            }
+            switch (localSym) {
+              case XK_G:
+              case XK_g:
+                ((DesktopWindow*)window())->grabKeyboard();
+                break;
+              case XK_M:
+              case XK_m:
+                popupContextMenu();
+                break;
+              case XK_KP_Enter:
+              case XK_Return:
+                if (window()->fullscreen_active()) {
+                  fullScreen.setParam(false);
+                  window()->fullscreen_off();
+                } else {
+                  fullScreen.setParam(true);
+                  ((DesktopWindow*)window())->fullscreen_on();
+                }
+                break;
+            }
+            continue;
+          }
+        }
+        sendKeyPress(systemKeyCode, keyCode, dk);
+        serverPressedKeysyms.insert(dk);
+        keysymToSentSystemKeyCode[dk] = systemKeyCode;
+      } else {
+        int systemKeyCode = 0x10000 + dk;
+        sendKeyPress(systemKeyCode, 0, dk);
+        serverPressedKeysyms.insert(dk);
+        keysymToSentSystemKeyCode[dk] = systemKeyCode;
+      }
+    }
+  }
+}
 
 void Viewport::handleKeyPress(int systemKeyCode,
                               uint32_t keyCode, uint32_t keySym)
 {
   pressedKeys.insert(systemKeyCode);
 
-  // Possible keyboard shortcut?
+  physicalPressedKeysyms.insert(keySym);
+  physicalKeyToKeysym[systemKeyCode] = keySym;
+  keysymToPhysicalEvent[keySym] = {systemKeyCode, keyCode};
 
-  if (!shortcutBypass) {
-    ShortcutHandler::KeyAction action;
-
-    action = shortcutHandler.handleKeyPress(systemKeyCode, keySym);
-
-    if (action == ShortcutHandler::KeyIgnore) {
-      vlog.debug("Ignoring key press %d => 0x%02x / XK_%s (0x%04x)",
-                 systemKeyCode, keyCode, KeySymName(keySym), keySym);
-      return;
-    }
-
-    if (action == ShortcutHandler::KeyShortcut) {
-      std::list<uint32_t> keySyms;
-      std::list<uint32_t>::const_iterator iter;
-
-      // Modifiers can change the KeySym that's been resolved, so we
-      // need to check all possible KeySyms for this physical key, not
-      // just the current one
-      keySyms = keyboard->translateToKeySyms(systemKeyCode);
-
-      // Then we pick the one that matches first
-      keySym = NoSymbol;
-      for (iter = keySyms.begin(); iter != keySyms.end(); iter++) {
-        bool found;
-
-        switch (*iter) {
-        case XK_space:
-        case XK_G:
-        case XK_g:
-        case XK_M:
-        case XK_m:
-        case XK_KP_Enter:
-        case XK_Return:
-          keySym = *iter;
-          found = true;
-          break;
-        default:
-          found = false;
-          break;
-        }
-
-        if (found)
-          break;
-      }
-
-      if (keySym != NoSymbol) {
-        vlog.debug("Detected shortcut %d => 0x%02x / XK_%s (0x%04x)",
-                  systemKeyCode, keyCode, KeySymName(keySym), keySym);
-      } else {
-        std::string names;
-
-        for (iter = keySyms.begin(); iter != keySyms.end(); iter++) {
-          if (!names.empty())
-            names += ", ";
-          names += core::format("XK_%s (0x%04x)",
-                                KeySymName(*iter), *iter);
-        }
-
-        vlog.debug("Detected unknown shortcut %d => 0x%02x / %s",
-                   systemKeyCode, keyCode, names.c_str());
-      }
-
-      // Special case which we need to handle first
-      if (keySym == XK_space) {
-        // If another shortcut has already fired, then we're too late as
-        // we've already released the modifier keys
-        if (!shortcutActive) {
-          shortcutBypass = true;
-          shortcutHandler.reset();
-        }
-        return;
-      }
-
-      shortcutActive = true;
-
-      // The remote session won't see any more keys, so release the ones
-      // currently down
-      try {
-        cc->releaseAllKeys();
-      } catch (std::exception& e) {
-        vlog.error("%s", e.what());
-        abort_connection(_("An unexpected error occurred when communicating "
-                           "with the server:\n\n%s"), e.what());
-      }
-
-      switch (keySym) {
-      case XK_G:
-      case XK_g:
-        ((DesktopWindow*)window())->grabKeyboard();
-        break;
-      case XK_M:
-      case XK_m:
-        popupContextMenu();
-        break;
-      case XK_KP_Enter:
-      case XK_Return:
-        if (window()->fullscreen_active()) {
-          fullScreen.setParam(false);
-          window()->fullscreen_off();
-        } else {
-          fullScreen.setParam(true);
-          ((DesktopWindow*)window())->fullscreen_on();
-        }
-        break;
-      default:
-        // Unknown/Unused keyboard shortcut
-        break;
-      }
-
-      return;
-    }
-  }
-
-  // Normal key, so send to server...
-
-  sendKeyPress(systemKeyCode, keyCode, keySym);
+  updateKeyMappingState();
 }
 
 void Viewport::sendKeyPress(int systemKeyCode,
@@ -829,7 +977,6 @@ void Viewport::sendKeyPress(int systemKeyCode,
   }
 }
 
-
 void Viewport::handleKeyRelease(int systemKeyCode)
 {
   pressedKeys.erase(systemKeyCode);
@@ -837,50 +984,19 @@ void Viewport::handleKeyRelease(int systemKeyCode)
   if (pressedKeys.empty())
     shortcutActive = false;
 
-  // Possible keyboard shortcut?
+  auto iter = physicalKeyToKeysym.find(systemKeyCode);
+  if (iter != physicalKeyToKeysym.end()) {
+    uint32_t keySym = iter->second;
+    physicalPressedKeysyms.erase(keySym);
+    physicalKeyToKeysym.erase(iter);
 
-  if (!shortcutBypass) {
-    ShortcutHandler::KeyAction action;
+    updateKeyMappingState();
 
-    action = shortcutHandler.handleKeyRelease(systemKeyCode);
-
-    if (action == ShortcutHandler::KeyIgnore) {
-      vlog.debug("Ignoring key release %d", systemKeyCode);
-      return;
-    }
-
-    if (action == ShortcutHandler::KeyShortcut) {
-      vlog.debug("Shortcut release %d", systemKeyCode);
-      return;
-    }
-
-    if (action == ShortcutHandler::KeyUnarm) {
-      DesktopWindow *win;
-
-      vlog.debug("Detected shortcut to release grab");
-
-      try {
-        cc->releaseAllKeys();
-      } catch (std::exception& e) {
-        vlog.error("%s", e.what());
-        abort_connection(_("An unexpected error occurred when communicating "
-                           "with the server:\n\n%s"), e.what());
-      }
-
-      win = dynamic_cast<DesktopWindow*>(window());
-      assert(win);
-      win->ungrabKeyboard();
-
-      return;
-    }
+    keysymToPhysicalEvent.erase(keySym);
   }
 
   if (pressedKeys.empty())
     shortcutBypass = false;
-
-  // Normal key, so send to server...
-
-  sendKeyRelease(systemKeyCode);
 }
 
 void Viewport::sendKeyRelease(int systemKeyCode)
@@ -992,7 +1108,16 @@ void Viewport::popupContextMenu()
   if (m == nullptr)
     return;
 
-  switch (m->argument()) {
+  bool toggleValue = false;
+  if (m->argument() == ID_CTRL || m->argument() == ID_ALT) {
+    toggleValue = m->value();
+  }
+  executeMenuAction(m->argument(), toggleValue);
+}
+
+void Viewport::executeMenuAction(int id, bool toggleValue)
+{
+  switch (id) {
   case ID_DISCONNECT:
     disconnect();
     break;
@@ -1017,14 +1142,14 @@ void Viewport::popupContextMenu()
     window()->size(w(), h());
     break;
   case ID_CTRL:
-    if (m->value())
+    if (toggleValue)
       sendKeyPress(FAKE_CTRL_KEY_CODE, 0x1d, XK_Control_L);
     else
       sendKeyRelease(FAKE_CTRL_KEY_CODE);
     menuCtrlKey = !menuCtrlKey;
     break;
   case ID_ALT:
-    if (m->value())
+    if (toggleValue)
       sendKeyPress(FAKE_ALT_KEY_CODE, 0x38, XK_Alt_L);
     else
       sendKeyRelease(FAKE_ALT_KEY_CODE);
@@ -1055,6 +1180,67 @@ void Viewport::popupContextMenu()
   }
 }
 
+#ifdef WIN32
+void Viewport::popupNativeContextMenu()
+{
+  HMENU hMenu = CreatePopupMenu();
+  if (!hMenu) return;
+
+  AppendMenuW(hMenu, MF_STRING, ID_DISCONNECT, utf8_to_wstring(p_("ContextMenu|", "Disconn&ect")).c_str());
+  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+  
+  UINT fsFlags = MF_STRING;
+  if (window()->fullscreen_active()) fsFlags |= MF_CHECKED;
+  AppendMenuW(hMenu, fsFlags, ID_FULLSCREEN, utf8_to_wstring(p_("ContextMenu|", "&Full screen")).c_str());
+  
+  AppendMenuW(hMenu, MF_STRING, ID_MINIMIZE, utf8_to_wstring(p_("ContextMenu|", "Minimi&ze")).c_str());
+  
+  UINT rsFlags = MF_STRING;
+  if (window()->fullscreen_active()) rsFlags |= MF_GRAYED;
+  AppendMenuW(hMenu, rsFlags, ID_RESIZE, utf8_to_wstring(p_("ContextMenu|", "Resize &window to session")).c_str());
+  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+  
+  UINT ctrlFlags = MF_STRING;
+  if (menuCtrlKey) ctrlFlags |= MF_CHECKED;
+  AppendMenuW(hMenu, ctrlFlags, ID_CTRL, utf8_to_wstring(p_("ContextMenu|", "&Ctrl")).c_str());
+  
+  UINT altFlags = MF_STRING;
+  if (menuAltKey) altFlags |= MF_CHECKED;
+  AppendMenuW(hMenu, altFlags, ID_ALT, utf8_to_wstring(p_("ContextMenu|", "&Alt")).c_str());
+  
+  AppendMenuW(hMenu, MF_STRING, ID_CTRLALTDEL, utf8_to_wstring(p_("ContextMenu|", "Send Ctrl-Alt-&Del")).c_str());
+  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+  
+  AppendMenuW(hMenu, MF_STRING, ID_REFRESH, utf8_to_wstring(p_("ContextMenu|", "&Refresh screen")).c_str());
+  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+  
+  AppendMenuW(hMenu, MF_STRING, ID_OPTIONS, utf8_to_wstring(p_("ContextMenu|", "&Options...")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_INFO, utf8_to_wstring(p_("ContextMenu|", "Connection &info...")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_ABOUT, utf8_to_wstring(p_("ContextMenu|", "About &TigerVNC...")).c_str());
+
+  POINT pos;
+  GetCursorPos(&pos);
+
+  HWND hwnd = fl_xid(window());
+  SetForegroundWindow(hwnd);
+  UINT selectedId = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                   pos.x, pos.y, 0, hwnd, NULL);
+  PostMessageW(hwnd, WM_NULL, 0, 0);
+  DestroyMenu(hMenu);
+
+  if (selectedId == 0) return;
+
+  bool toggleValue = false;
+  if (selectedId == ID_CTRL) {
+    toggleValue = !menuCtrlKey;
+  } else if (selectedId == ID_ALT) {
+    toggleValue = !menuAltKey;
+  }
+
+  executeMenuAction(selectedId, toggleValue);
+}
+#endif
+
 void Viewport::handleOptions(void *data)
 {
   Viewport *self = (Viewport*)data;
@@ -1068,4 +1254,7 @@ void Viewport::handleOptions(void *data)
 
   if (Fl::belowmouse() == self)
     self->showCursor();
+
+  self->parseKeyMappings();
+  self->updateKeyMappingState();
 }

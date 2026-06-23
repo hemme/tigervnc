@@ -41,6 +41,8 @@
 #include "ShortcutHandler.h"
 #include "i18n.h"
 #include "parameters.h"
+#include <core/xdgdirs.h>
+#include <fstream>
 
 #include "fltk/layout.h"
 #include "fltk/util.h"
@@ -65,6 +67,9 @@
 #include <FL/Fl_Toggle_Button.H>
 #include <FL/Fl_Int_Input.H>
 #include <FL/Fl_Choice.H>
+#include <FL/Fl_Input.H>
+#include <FL/Fl_Multiline_Input.H>
+#include <FL/filename.H>
 
 std::map<OptionsCallback*, void*> OptionsDialog::callbacks;
 
@@ -98,6 +103,7 @@ OptionsDialog::OptionsDialog()
     createShortcutsPage(tx, ty, tw, th);
     createDisplayPage(tx, ty, tw, th);
     createMiscPage(tx, ty, tw, th);
+    createKeyMappingsPage(tx, ty, tw, th);
   }
 
   navigation->end();
@@ -368,6 +374,8 @@ void OptionsDialog::loadOptions(void)
     cursorTypeChoice->value(0);
   }
   handleAlwaysCursor(alwaysCursorCheckbox, this);
+
+  keyMappingsInput->value(keyMappings);
 }
 
 
@@ -523,6 +531,8 @@ void OptionsDialog::storeOptions(void)
     // Default
     cursorType.setParam("Dot");
   }
+
+  keyMappings.setParam(keyMappingsInput->value());
 
   std::map<OptionsCallback*, void*>::const_iterator iter;
 
@@ -1421,6 +1431,85 @@ void OptionsDialog::handleOK(Fl_Widget* /*widget*/, void *data)
   dialog->storeOptions();
 }
 
+void OptionsDialog::handleHelpKeysyms(Fl_Widget* /*widget*/, void* /*data*/)
+{
+  const char* configDir = core::getvncconfigdir();
+  if (!configDir) return;
+
+  std::string helpPath = std::string(configDir) + "/keymappings_help.html";
+  std::ofstream f(helpPath.c_str());
+  if (!f.is_open()) return;
+
+  f << "<!DOCTYPE html>\n"
+       "<html>\n"
+       "<head>\n"
+       "<meta charset=\"UTF-8\">\n"
+       "<title>TigerVNC Key Mappings Help</title>\n"
+       "<style>\n"
+       "  body { font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 40px auto; padding: 0 20px; background-color: #f9f9f9; }\n"
+       "  h1 { color: #111; border-bottom: 1px solid #ddd; padding-bottom: 10px; font-size: 24px; }\n"
+       "  h2 { color: #444; font-size: 18px; margin-top: 30px; }\n"
+       "  p { margin: 1em 0; }\n"
+       "  code { font-family: \"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, Courier, monospace; background-color: #eaeaea; padding: 2px 5px; border-radius: 3px; font-size: 14px; }\n"
+       "  table { width: 100%; border-collapse: collapse; margin: 20px 0; background: #fff; border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }\n"
+       "  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }\n"
+       "  th { background-color: #f1f1f1; font-weight: bold; color: #555; }\n"
+       "  tr:last-child td { border-bottom: none; }\n"
+       "  .note { background-color: #e7f3fe; border-left: 4px solid #2196F3; padding: 12px; border-radius: 0 4px 4px 0; margin: 20px 0; }\n"
+       "</style>\n"
+       "</head>\n"
+       "<body>\n"
+       "  <h1>TigerVNC Key Mappings Reference</h1>\n"
+       "  <p>You can map single keys or combinations (chords) using the format <code>Source-&gt;Target</code> (one mapping per line or separated by semicolon <code>;</code>).</p>\n"
+       "  <p>To combine keys pressed simultaneously, use the plus <code>+</code> symbol, e.g. <code>Control_L+Alt_L+f-&gt;F11</code>.</p>\n"
+       "\n"
+       "  <h2>Common Keysym Names</h2>\n"
+       "  <table>\n"
+       "    <thead>\n"
+       "      <tr><th>Category</th><th>Key Name (Case-Sensitive)</th><th>Description</th></tr>\n"
+       "    </thead>\n"
+       "    <tbody>\n"
+       "      <tr><td>Modifiers</td><td><code>Control_L</code>, <code>Control_R</code></td><td>Left / Right Control</td></tr>\n"
+       "      <tr><td>Modifiers</td><td><code>Alt_L</code>, <code>Alt_R</code></td><td>Left / Right Alt</td></tr>\n"
+       "      <tr><td>Modifiers</td><td><code>Shift_L</code>, <code>Shift_R</code></td><td>Left / Right Shift</td></tr>\n"
+       "      <tr><td>Modifiers</td><td><code>Super_L</code>, <code>Super_R</code></td><td>Left / Right Windows Key (Win)</td></tr>\n"
+       "      <tr><td>Modifiers</td><td><code>Meta_L</code>, <code>Meta_R</code></td><td>Left / Right Command Key (Apple Cmd)</td></tr>\n"
+       "      <tr><td>Navigation</td><td><code>Left</code>, <code>Up</code>, <code>Right</code>, <code>Down</code></td><td>Arrow keys</td></tr>\n"
+       "      <tr><td>Navigation</td><td><code>Home</code>, <code>End</code>, <code>Page_Up</code>, <code>Page_Down</code></td><td>Navigation keys</td></tr>\n"
+       "      <tr><td>Action</td><td><code>Return</code></td><td>Enter Key</td></tr>\n"
+       "      <tr><td>Action</td><td><code>Escape</code>, <code>Tab</code>, <code>space</code>, <code>BackSpace</code></td><td>Control keys</td></tr>\n"
+       "      <tr><td>Action</td><td><code>Delete</code>, <code>Insert</code>, <code>Pause</code>, <code>Break</code></td><td>Editing / System keys</td></tr>\n"
+       "      <tr><td>Function</td><td><code>F1</code> to <code>F12</code></td><td>Function keys</td></tr>\n"
+       "      <tr><td>Keypad</td><td><code>KP_0</code> to <code>KP_9</code>, <code>KP_Enter</code></td><td>Numeric Keypad keys</td></tr>\n"
+       "      <tr><td>Characters</td><td><code>a</code>-<code>z</code>, <code>A</code>-<code>Z</code>, <code>0</code>-<code>9</code></td><td>Standard letter/number keys</td></tr>\n"
+       "    </tbody>\n"
+       "  </table>\n"
+       "\n"
+       "  <div class=\"note\">\n"
+       "    <strong>Note:</strong> Multiple mapped target keys (e.g. <code>H+e+l+o</code>) are sent as if they are all pressed <strong>simultaneously</strong> at once, not typed in sequence.\n"
+       "  </div>\n"
+       "</body>\n"
+       "</html>\n";
+  f.close();
+
+  // Convert Windows path separators to forward slashes for the file:// URL
+  std::string fileUrl = helpPath;
+  for (size_t i = 0; i < fileUrl.length(); ++i) {
+    if (fileUrl[i] == '\\') {
+      fileUrl[i] = '/';
+    }
+  }
+
+  // Ensure file:/// prefix
+  if (fileUrl.length() > 0 && fileUrl[0] != '/') {
+    fileUrl = "file:///" + fileUrl;
+  } else {
+    fileUrl = "file://" + fileUrl;
+  }
+
+  fl_open_uri(fileUrl.c_str());
+}
+
 int OptionsDialog::fltk_event_handler(int event)
 {
   std::set<OptionsDialog *>::iterator iter;
@@ -1455,4 +1544,38 @@ void OptionsDialog::handleAlwaysCursor(Fl_Widget* /*widget*/, void *data)
   } else {
     dialog->cursorTypeChoice->deactivate();
   }
+}
+
+void OptionsDialog::createKeyMappingsPage(int tx, int ty, int tw, int th)
+{
+  Fl_Group *group = new Fl_Group(tx, ty, tw, th, _("Key mappings"));
+
+  tx += OUTER_MARGIN;
+  ty += OUTER_MARGIN;
+
+  Fl_Box *intro = new Fl_Box(tx, ty, tw - OUTER_MARGIN * 2, INPUT_HEIGHT);
+  intro->align(FL_ALIGN_TOP_LEFT | FL_ALIGN_INSIDE);
+  intro->label(_("Define key/shortcut mappings (one per line, e.g., Source->Target):"));
+
+  ty += INPUT_HEIGHT + INNER_MARGIN;
+
+  int example_height = INPUT_HEIGHT;
+  int input_height = th - ty - OUTER_MARGIN - example_height - INNER_MARGIN;
+
+  keyMappingsInput = new Fl_Multiline_Input(tx, ty, tw - OUTER_MARGIN * 2, input_height);
+  keyMappingsInput->align(FL_ALIGN_TOP_LEFT);
+
+  ty += input_height + INNER_MARGIN;
+
+  int btn_width = 80;
+  int lbl_width = tw - OUTER_MARGIN * 2 - btn_width - INNER_MARGIN;
+
+  Fl_Box *example = new Fl_Box(tx, ty, lbl_width, example_height);
+  example->align(FL_ALIGN_TOP_LEFT | FL_ALIGN_INSIDE);
+  example->label(_("Example: Control_L+Alt_L+f->F11"));
+
+  Fl_Button *helpBtn = new Fl_Button(tx + lbl_width + INNER_MARGIN, ty, btn_width, BUTTON_HEIGHT, _("Help"));
+  helpBtn->callback(handleHelpKeysyms, this);
+
+  group->end();
 }
