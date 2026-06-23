@@ -30,6 +30,7 @@ class Fl_Check_Button;
 class Fl_Round_Button;
 class Fl_Toggle_Button;
 class Fl_Input;
+class Fl_Multiline_Input;
 class Fl_Int_Input;
 class Fl_Choice;
 class Fl_Monitor_Arrangement;
@@ -59,6 +60,7 @@ protected:
   void createShortcutsPage(int tx, int ty, int tw, int th);
   void createDisplayPage(int tx, int ty, int tw, int th);
   void createMiscPage(int tx, int ty, int tw, int th);
+  void createKeyMappingsPage(int tx, int ty, int tw, int th);
 
   static void handleAutoselect(Fl_Widget *widget, void *data);
   static void handleCompression(Fl_Widget *widget, void *data);
@@ -77,6 +79,7 @@ protected:
 
   static void handleCancel(Fl_Widget *widget, void *data);
   static void handleOK(Fl_Widget *widget, void *data);
+  static void handleHelpKeysyms(Fl_Widget *widget, void *data);
 
 protected:
   static std::map<OptionsCallback*, void*> callbacks;
@@ -146,6 +149,7 @@ protected:
   Fl_Toggle_Button *superButton;
 
   Fl_Box *shortcutsText;
+  Fl_Multiline_Input *keyMappingsInput;
 
   /* Display */
   Fl_Group *displayModeGroup;

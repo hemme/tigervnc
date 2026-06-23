@@ -55,6 +55,11 @@
 
 #if defined(WIN32)
 #include "win32.h"
+#include <shellapi.h>
+#include <commctrl.h>
+#include <vector>
+#include "resource.h"
+#define MY_WM_TRAYICON (WM_USER + 101)
 #elif defined(__APPLE__)
 #include "cocoa.h"
 #include <Carbon/Carbon.h>
@@ -250,11 +255,51 @@ DesktopWindow::DesktopWindow(int w, int h, CConn* cc_)
   CGEventSourceSetLocalEventsSuppressionInterval(event, 0);
   CFRelease(event);
 #endif
+
+#ifdef WIN32
+  NOTIFYICONDATAW nid;
+  memset(&nid, 0, sizeof(nid));
+  nid.cbSize = sizeof(NOTIFYICONDATAW);
+  nid.hWnd = fl_xid(this);
+  nid.uID = 1;
+  nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  nid.uCallbackMessage = MY_WM_TRAYICON;
+  nid.hIcon = (HICON)LoadImage(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_ICON),
+                               IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                               LR_DEFAULTSIZE | LR_SHARED);
+  const char* tooltip = cc->server.name();
+  if (tooltip) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, tooltip, -1, NULL, 0);
+    if (len > 0) {
+      std::vector<wchar_t> wtooltip(len);
+      MultiByteToWideChar(CP_UTF8, 0, tooltip, -1, wtooltip.data(), len);
+      wcsncpy(nid.szTip, wtooltip.data(), sizeof(nid.szTip) / sizeof(wchar_t) - 1);
+      nid.szTip[sizeof(nid.szTip) / sizeof(wchar_t) - 1] = L'\0';
+    }
+  }
+  Shell_NotifyIconW(NIM_ADD, &nid);
+
+  SetWindowSubclass(fl_xid(this), traySubclassProc, 1, (DWORD_PTR)this);
+#endif
 }
 
 
 DesktopWindow::~DesktopWindow()
 {
+#ifdef WIN32
+  HWND hwnd = fl_xid(this);
+  if (hwnd) {
+    RemoveWindowSubclass(hwnd, traySubclassProc, 1);
+
+    NOTIFYICONDATAW nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+  }
+#endif
+
   // Don't leave any dangling grabs as they are not automatically
   // cleaned up on all platforms
   ungrabPointer();
@@ -1015,6 +1060,27 @@ int DesktopWindow::fltkHandle(int event)
 
   return 0;
 }
+
+#ifdef WIN32
+LRESULT CALLBACK DesktopWindow::traySubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+                                                 UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+  (void)wParam;
+  (void)uIdSubclass;
+  if (uMsg == MY_WM_TRAYICON) {
+    if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP) {
+      DesktopWindow *self = (DesktopWindow *)dwRefData;
+      if (self) {
+        SetForegroundWindow(hwnd);
+        if (self->viewport)
+          self->viewport->popupNativeContextMenu();
+      }
+      return 0;
+    }
+  }
+  return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+}
+#endif
 
 void DesktopWindow::fullscreen_on()
 {

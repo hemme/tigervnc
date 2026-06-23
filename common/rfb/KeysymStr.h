@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 const char* KeySymName(unsigned keysym);
+unsigned int StringToKeysym(const char* name);
 
 #ifdef __cplusplus
 }

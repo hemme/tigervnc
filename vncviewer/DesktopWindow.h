@@ -94,6 +94,10 @@ private:
 
   static int fltkDispatch(int event, Fl_Window *win, void *);
   static int fltkHandle(int event);
+#ifdef WIN32
+  static LRESULT CALLBACK traySubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+                                           UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+#endif
 
   bool hasFocus();
   static void checkFocus(void *data);
