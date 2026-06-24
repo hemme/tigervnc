@@ -90,6 +90,15 @@ core::BoolParameter
                    "exiting immediately and ask for a reconnect.",
                    true);
 
+core::BoolParameter
+  rememberSettingsOnDisconnect("RememberSettingsOnDisconnect",
+                               "Ask to save settings based on the server IP "
+                               "when disconnecting",
+                               false);
+
+std::string loadedServerName = "";
+bool configLoadedFromFile = false;
+
 core::StringParameter
   passwordFile("PasswordFile",
                "Password file for VNC authentication",
@@ -264,6 +273,7 @@ static core::VoidParameter* parameterArray[] = {
   /* Misc. */
   &reconnectOnError,
   &shared,
+  &rememberSettingsOnDisconnect,
   /* Compression */
   &autoSelect,
   &fullColour,
@@ -835,6 +845,7 @@ char* loadViewerParameters(const char *filename) {
 
     snprintf(filepath, sizeof(filepath), "%s/default.tigervnc", configDir);
   } else {
+    configLoadedFromFile = true;
     snprintf(filepath, sizeof(filepath), "%s", filename);
   }
 
@@ -970,4 +981,168 @@ void migrateDeprecatedOptions()
     alwaysCursor.setParam(true);
     cursorType.setParam("Dot");
   }
+}
+
+static std::string getSanitizedServerName(const char* servername) {
+  std::string s;
+  if (!servername) return s;
+  for (int i = 0; servername[i] != '\0'; ++i) {
+    char c = servername[i];
+    if (isalnum(c) || c == '.' || c == '-' || c == '_') {
+      s += c;
+    } else {
+      s += '_';
+    }
+  }
+  return s;
+}
+
+#ifdef _WIN32
+static void saveServerToReg(const char* servername) {
+  if (!servername || servername[0] == '\0') return;
+  std::string sanitized = getSanitizedServerName(servername);
+  std::string keyPath = std::string("Software\\TigerVNC\\vncviewer\\Servers\\") + sanitized;
+  std::wstring wkeyPath(keyPath.begin(), keyPath.end());
+  
+  HKEY hKey;
+  LONG res = RegCreateKeyExW(HKEY_CURRENT_USER,
+                             wkeyPath.c_str(), 0, nullptr,
+                             REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr,
+                             &hKey, nullptr);
+  if (res != ERROR_SUCCESS)
+    throw core::win32_error(_("Failed to create registry key"), res);
+
+  try {
+    setKeyString("ServerName", servername, &hKey);
+  } catch (std::exception& e) {
+    RegCloseKey(hKey);
+    throw std::runtime_error(core::format(
+      _("Failed to save \"%s\": %s"), "ServerName", e.what()));
+  }
+
+  for (core::VoidParameter* param : parameterArray) {
+    core::IntParameter* iparam;
+    core::BoolParameter* bparam;
+
+    if (param->isDefault()) {
+      try {
+        removeValue(param->getName(), &hKey);
+      } catch (std::exception& e) {
+        RegCloseKey(hKey);
+        throw std::runtime_error(
+          core::format(_("Failed to remove \"%s\": %s"),
+                       param->getName(), e.what()));
+      }
+      continue;
+    }
+
+    iparam = dynamic_cast<core::IntParameter*>(param);
+    bparam = dynamic_cast<core::BoolParameter*>(param);
+
+    try {
+      if (iparam != nullptr) {
+        setKeyInt(iparam->getName(), (int)*(iparam), &hKey);
+      } else if (bparam != nullptr) {
+        setKeyInt(bparam->getName(), (int)*(bparam), &hKey);
+      } else {
+        setKeyString(param->getName(), param->getValueStr().c_str(), &hKey);
+      }
+    } catch (std::exception& e) {
+      RegCloseKey(hKey);
+      throw std::runtime_error(
+        core::format(_("Failed to save \"%s\": %s"),
+                     param->getName(), e.what()));
+    }
+  }
+
+  for (core::VoidParameter* param : readOnlyParameterArray) {
+    try {
+      removeValue(param->getName(), &hKey);
+    } catch (std::exception& e) {
+      RegCloseKey(hKey);
+      throw std::runtime_error(
+        core::format(_("Failed to remove \"%s\": %s"),
+                     param->getName(), e.what()));
+    }
+  }
+
+  res = RegCloseKey(hKey);
+  if (res != ERROR_SUCCESS)
+    throw core::win32_error(_("Failed to close registry key"), res);
+}
+
+static bool loadServerFromReg(const char* servername) {
+  if (!servername || servername[0] == '\0') return false;
+  std::string sanitized = getSanitizedServerName(servername);
+  std::string keyPath = std::string("Software\\TigerVNC\\vncviewer\\Servers\\") + sanitized;
+  std::wstring wkeyPath(keyPath.begin(), keyPath.end());
+  
+  HKEY hKey;
+  LONG res = RegOpenKeyExW(HKEY_CURRENT_USER,
+                           wkeyPath.c_str(), 0,
+                           KEY_READ, &hKey);
+  if (res != ERROR_SUCCESS) {
+    return false;
+  }
+
+  getParametersFromReg(parameterArray,
+                       sizeof(parameterArray) /
+                         sizeof(core::VoidParameter*),
+                       &hKey);
+  getParametersFromReg(readOnlyParameterArray,
+                       sizeof(readOnlyParameterArray) /
+                         sizeof(core::VoidParameter*),
+                       &hKey);
+
+  res = RegCloseKey(hKey);
+  if (res != ERROR_SUCCESS)
+    throw core::win32_error(_("Failed to close registry key"), res);
+
+  migrateDeprecatedOptions();
+  return true;
+}
+#endif
+
+void saveServerParameters(const char *servername) {
+  if (!servername || servername[0] == '\0') return;
+#ifdef _WIN32
+  saveServerToReg(servername);
+#else
+  const char* configDir = core::getvncconfigdir();
+  if (configDir == nullptr)
+    throw std::runtime_error(_("Could not determine VNC config directory path"));
+
+  std::string sanitized = getSanitizedServerName(servername);
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "%s/%s.tigervnc", configDir, sanitized.c_str());
+  saveViewerParameters(filepath, servername);
+#endif
+}
+
+bool loadServerParameters(const char *servername) {
+  if (!servername || servername[0] == '\0') return false;
+  loadedServerName = servername;
+#ifdef _WIN32
+  return loadServerFromReg(servername);
+#else
+  const char* configDir = core::getvncconfigdir();
+  if (configDir == nullptr)
+    return false;
+
+  std::string sanitized = getSanitizedServerName(servername);
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "%s/%s.tigervnc", configDir, sanitized.c_str());
+
+  FILE* f = fopen(filepath, "r");
+  if (!f) return false;
+  fclose(f);
+
+  try {
+    loadViewerParameters(filepath);
+    return true;
+  } catch (std::exception& e) {
+    vlog.error(_("Failed to load server-specific settings: %s"), e.what());
+    return false;
+  }
+#endif
 }

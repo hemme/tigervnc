@@ -216,6 +216,18 @@ static void mainloop(const char* vncserver, network::Socket* sock)
 
     break;
   }
+
+  if (!listenMode && vncserver && vncserver[0] != '\0' && rememberSettingsOnDisconnect) {
+    int ret = fl_choice(_("Do you want to save the settings for server %s?"),
+                        fl_no, fl_yes, nullptr, vncserver);
+    if (ret == 1) {
+      try {
+        saveServerParameters(vncserver);
+      } catch (std::exception& e) {
+        fl_alert(_("Unable to save settings:\n\n%s"), e.what());
+      }
+    }
+  }
 }
 
 #ifdef __APPLE__
@@ -660,6 +672,7 @@ int main(int argc, char** argv)
     if (configServerName != nullptr) {
       strncpy(defaultServerName, configServerName, VNCSERVERNAMELEN-1);
       defaultServerName[VNCSERVERNAMELEN-1] = '\0';
+      loadServerParameters(defaultServerName);
     }
   } catch (std::exception& e) {
     vlog.error("%s", e.what());
@@ -791,6 +804,10 @@ int main(int argc, char** argv)
       ServerDialog::run(defaultServerName, vncServerName);
       if (vncServerName[0] == '\0')
         return 1;
+    }
+
+    if (vncServerName[0] != '\0' && !configLoadedFromFile && loadedServerName != vncServerName) {
+      loadServerParameters(vncServerName);
     }
 
 #ifndef WIN32
