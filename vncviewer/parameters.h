@@ -24,9 +24,9 @@
 
 #include "MonitorIndicesParameter.h"
 
+#include <string>
 #ifdef _WIN32
 #include <list>
-#include <string>
 #endif
 
 #define SERVER_HISTORY_SIZE 20
@@ -83,8 +83,15 @@ extern core::BoolParameter reconnectOnError;
 extern core::StringParameter via;
 #endif
 
+extern core::BoolParameter rememberSettingsOnDisconnect;
+extern std::string loadedServerName;
+extern bool configLoadedFromFile;
+
 void saveViewerParameters(const char *filename, const char *servername=nullptr);
 char* loadViewerParameters(const char *filename);
+
+void saveServerParameters(const char *servername);
+bool loadServerParameters(const char *servername);
 
 #ifdef _WIN32
 std::list<std::string> loadHistoryFromRegKey();

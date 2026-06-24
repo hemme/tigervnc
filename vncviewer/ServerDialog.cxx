@@ -156,8 +156,13 @@ void ServerDialog::run(const char* servername, char *newservername)
   newservername[VNCSERVERNAMELEN - 1] = '\0';
 }
 
-void ServerDialog::handleOptions(Fl_Widget* /*widget*/, void* /*data*/)
+void ServerDialog::handleOptions(Fl_Widget* /*widget*/, void* data)
 {
+  ServerDialog *dialog = (ServerDialog*)data;
+  const char* servername = dialog->serverName->value();
+  if (servername && servername[0] != '\0' && loadedServerName != servername) {
+    loadServerParameters(servername);
+  }
   OptionsDialog::showDialog();
 }
 
