@@ -23,6 +23,8 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <list>
+#include <set>
+#include <string>
 
 #include <core/i18n.h>
 #include <core/string.h>
@@ -344,6 +346,10 @@ void OptionsDialog::loadOptions(void)
   altButton->value(modifierMask & ShortcutHandler::Alt);
   superButton->value(modifierMask & ShortcutHandler::Super);
 
+  /* Load key mappings before building the shortcuts text so the conflict
+   * warning can take them into account. */
+  keyMappingsInput->value(keyMappings);
+
   handleModifier(nullptr, this);
 
   /* Display */
@@ -363,6 +369,8 @@ void OptionsDialog::loadOptions(void)
 
   handleFullScreenMode(selectedMonitorsButton, this);
 
+  fitToWindowCheckbox->value(fitToWindow);
+
   /* Misc. */
   sharedCheckbox->value(shared);
   reconnectCheckbox->value(reconnectOnError);
@@ -375,8 +383,6 @@ void OptionsDialog::loadOptions(void)
     cursorTypeChoice->value(0);
   }
   handleAlwaysCursor(alwaysCursorCheckbox, this);
-
-  keyMappingsInput->value(keyMappings);
 }
 
 
@@ -520,6 +526,8 @@ void OptionsDialog::storeOptions(void)
   }
 
   fullScreenSelectedMonitors.setMonitors(monitorArrangement->value());
+
+  fitToWindow.setParam(fitToWindowCheckbox->value());
 
   /* Misc. */
   shared.setParam(sharedCheckbox->value());
@@ -1113,8 +1121,20 @@ void OptionsDialog::createShortcutsPage(int tx, int ty, int tw, int th)
 
   ty += BUTTON_HEIGHT + INNER_MARGIN;
 
-  shortcutsText = new Fl_Box(tx, ty, tw - OUTER_MARGIN * 2, th - ty - OUTER_MARGIN);
+  // Reserve a strip at the bottom for the conflict warning so the help
+  // text can never overflow on to the dialog buttons.
+  const int warningReserve = 66;
+  shortcutsText = new Fl_Box(tx, ty, tw - OUTER_MARGIN * 2,
+                             th - ty - OUTER_MARGIN - warningReserve);
   shortcutsText->align(FL_ALIGN_TOP_LEFT|FL_ALIGN_INSIDE|FL_ALIGN_WRAP);
+
+  ty += th - ty - OUTER_MARGIN - warningReserve + INNER_MARGIN;
+
+  shortcutsWarning = new Fl_Box(tx, ty, tw - OUTER_MARGIN * 2,
+                                warningReserve - INNER_MARGIN);
+  shortcutsWarning->align(FL_ALIGN_TOP_LEFT|FL_ALIGN_INSIDE|FL_ALIGN_WRAP);
+  shortcutsWarning->labelcolor(FL_RED);
+  shortcutsWarning->copy_label("");
 
   group->end();
 }
@@ -1239,6 +1259,13 @@ void OptionsDialog::createDisplayPage(int tx, int ty, int tw, int th)
   tx = orig_tx;
   ty += INNER_MARGIN;
   width = tw - OUTER_MARGIN * 2;
+
+  fitToWindowCheckbox = new Fl_Check_Button(LBLRIGHT(tx, ty,
+                                             CHECK_MIN_WIDTH,
+                                             CHECK_HEIGHT,
+                                             _("Scale to fit window (zoom out "
+                                               "instead of scrolling)")));
+  ty += CHECK_HEIGHT + TIGHT_MARGIN;
 
   group->end();
 }
@@ -1374,6 +1401,7 @@ void OptionsDialog::handleModifier(Fl_Widget* /*widget*/, void *data)
   if (mask == 0) {
     dialog->shortcutsText->copy_label(
       _("All keyboard shortcuts are disabled."));
+    dialog->shortcutsWarning->copy_label("");
   } else {
     char prefix[256];
     char prefix_noplus[256];
@@ -1408,7 +1436,75 @@ void OptionsDialog::handleModifier(Fl_Widget* /*widget*/, void *data)
       prefix_noplus, prefix, prefix_noplus);
 
     dialog->shortcutsText->copy_label(label.c_str());
+
+    std::string warn = dialog->conflictingShortcutWarning(mask);
+    dialog->shortcutsWarning->copy_label(warn.empty() ? "" : warn.c_str());
   }
+}
+
+std::string OptionsDialog::conflictingShortcutWarning(unsigned mask)
+{
+  if (mask == 0)
+    return std::string();
+
+  if (!keyMappingsInput)
+    return std::string();
+
+  const char* raw = keyMappingsInput->value();
+  if ((raw == nullptr) || (raw[0] == '\0'))
+    return std::string();
+
+  // A shortcut modifier that is also the SOURCE of a key mapping gets
+  // "consumed" by the remapping, so the local shortcut handler never
+  // sees it and shortcuts silently stop working.
+  std::set<unsigned> conflicting;
+
+  std::string text(raw);
+  std::string rule;
+
+  for (size_t pos = 0; pos <= text.size(); pos++) {
+    if ((pos == text.size()) || (text[pos] == ';') ||
+        (text[pos] == '\n') || (text[pos] == '\r')) {
+      size_t arrow = rule.find("->");
+      if (arrow != std::string::npos) {
+        std::string src = rule.substr(0, arrow);
+        std::string token;
+        for (size_t spos = 0; spos <= src.size(); spos++) {
+          if ((spos == src.size()) || (src[spos] == '+')) {
+            size_t a = token.find_first_not_of(" \t");
+            size_t b = token.find_last_not_of(" \t");
+            if (a != std::string::npos) {
+              std::string name = token.substr(a, b - a + 1);
+              unsigned mod = ShortcutHandler::keyNameToModifier(name.c_str());
+              if ((mod != 0) && ((mod & mask) != 0))
+                conflicting.insert(mod);
+            }
+            token.clear();
+          } else {
+            token += src[spos];
+          }
+        }
+      }
+      rule.clear();
+    } else {
+      rule += text[pos];
+    }
+  }
+
+  if (conflicting.empty())
+    return std::string();
+
+  std::string names;
+  for (unsigned mod : conflicting) {
+    if (!names.empty())
+      names += ", ";
+    names += ShortcutHandler::modifierString(mod);
+  }
+
+  return core::format(_("Note: %s is remapped in your key mappings, so these "
+                        "shortcuts will not work. Use modifier keys that are "
+                        "not remapped."),
+                      names.c_str());
 }
 
 void OptionsDialog::handleFullScreenMode(Fl_Widget* /*widget*/, void *data)

@@ -46,6 +46,14 @@ public:
   void draw(Surface* dst, int src_x, int src_y, int dst_x, int dst_y,
             int dst_w, int dst_h);
 
+  // Scaled variants: blit the source sub-rectangle (src_x, src_y,
+  // src_w, src_h) scaled to fit the destination rectangle
+  // (dst_x, dst_y, dst_w, dst_h).
+  void draw(int src_x, int src_y, int src_w, int src_h,
+            int dst_x, int dst_y, int dst_w, int dst_h);
+  void draw(Surface* dst, int src_x, int src_y, int src_w, int src_h,
+            int dst_x, int dst_y, int dst_w, int dst_h);
+
   void blend(int src_x, int src_y, int dst_x, int dst_y,
              int dst_w, int dst_h, int a=255);
   void blend(Surface* dst, int src_x, int src_y, int dst_x, int dst_y,

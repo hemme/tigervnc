@@ -24,6 +24,7 @@
 
 #define XK_MISCELLANY
 #include <rfb/keysymdef.h>
+#include <rfb/KeysymStr.h>
 
 #include "ShortcutHandler.h"
 
@@ -273,4 +274,12 @@ unsigned ShortcutHandler::keySymToModifier(uint32_t keySym)
   }
 
   return 0;
+}
+
+unsigned ShortcutHandler::keyNameToModifier(const char* name)
+{
+  if ((name == nullptr) || (name[0] == '\0'))
+    return 0;
+
+  return keySymToModifier(StringToKeysym(name));
 }

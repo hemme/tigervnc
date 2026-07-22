@@ -112,6 +112,7 @@ static const int FAKE_KEY_CODE = 0xffff;
 
 Viewport::Viewport(int w, int h, CConn* cc_)
   : Fl_Widget(0, 0, w, h), cc(cc_), frameBuffer(nullptr),
+    scale(1.0),
     lastPointerPos(0, 0), lastButtonMask(0),
     keyboard(nullptr), shortcutBypass(false), shortcutActive(false),
     firstLEDState(true), pendingClientClipboard(false),
@@ -172,6 +173,7 @@ Viewport::~Viewport()
   // Unregister all timeouts in case they get a change tro trigger
   // again later when this object is already gone.
   Fl::remove_timeout(handlePointerTimeout, this);
+  Fl::remove_timeout(popupContextMenuTimeout, this);
 
   Fl::remove_system_handler(handleSystemEvent);
 
@@ -199,6 +201,67 @@ const rfb::PixelFormat &Viewport::getPreferredPF()
 }
 
 
+int Viewport::framebufferWidth() const
+{
+  return frameBuffer->width();
+}
+
+int Viewport::framebufferHeight() const
+{
+  return frameBuffer->height();
+}
+
+void Viewport::resizeFramebuffer(int w, int h)
+{
+  if ((w != frameBuffer->width()) || (h != frameBuffer->height())) {
+    vlog.debug("Resizing framebuffer from %dx%d to %dx%d",
+               frameBuffer->width(), frameBuffer->height(), w, h);
+
+    frameBuffer = new PlatformPixelBuffer(w, h);
+    assert(frameBuffer);
+    cc->setFramebuffer(frameBuffer);
+  }
+
+  // Keep the widget at the (scaled) visual size
+  int sw, sh;
+
+  sw = (int)((double)w * scale + 0.5);
+  sh = (int)((double)h * scale + 0.5);
+
+  if ((sw != this->w()) || (sh != this->h()))
+    Fl_Widget::resize(x(), y(), sw, sh);
+}
+
+void Viewport::setScale(double s)
+{
+  if (s < 0.01)
+    s = 0.01;
+  if (s > 1.0)
+    s = 1.0;
+  if (s == scale)
+    return;
+
+  scale = s;
+
+  int sw, sh;
+
+  sw = (int)((double)frameBuffer->width() * scale + 0.5);
+  sh = (int)((double)frameBuffer->height() * scale + 0.5);
+
+  if ((sw != this->w()) || (sh != this->h()))
+    Fl_Widget::resize(x(), y(), sw, sh);
+}
+
+core::Point Viewport::mapToFramebuffer(const core::Point& p) const
+{
+  if (scale >= 0.999)
+    return p;
+
+  return core::Point((int)((double)p.x / scale + 0.5),
+                     (int)((double)p.y / scale + 0.5));
+}
+
+
 // Copy the areas of the framebuffer that have been changed (damaged)
 // to the displayed window.
 
@@ -207,7 +270,19 @@ void Viewport::updateWindow()
   core::Rect r;
 
   r = frameBuffer->getDamage();
-  damage(FL_DAMAGE_USER1, r.tl.x + x(), r.tl.y + y(), r.width(), r.height());
+
+  // The damage is in native framebuffer coordinates; map it to the
+  // on-screen viewport (which may be scaled) so the right pixels repaint.
+  if (scale >= 0.999) {
+    damage(FL_DAMAGE_USER1, r.tl.x + x(), r.tl.y + y(),
+           r.width(), r.height());
+  } else {
+    int dx = (int)((double)r.tl.x * scale) + x();
+    int dy = (int)((double)r.tl.y * scale) + y();
+    int dw = (int)((double)r.width() * scale) + 2;
+    int dh = (int)((double)r.height() * scale) + 2;
+    damage(FL_DAMAGE_USER1, dx, dy, dw, dh);
+  }
 }
 
 static const char * dotcursor_xpm[] = {
@@ -411,7 +486,33 @@ void Viewport::draw(Surface* dst)
   if ((W == 0) || (H == 0))
     return;
 
-  frameBuffer->draw(dst, X - x(), Y - y(), X, Y, W, H);
+  int local_x, local_y;
+
+  local_x = X - x();
+  local_y = Y - y();
+
+  if (scale >= 0.999) {
+    frameBuffer->draw(dst, local_x, local_y, X, Y, W, H);
+  } else {
+    int sx, sy, sw, sh;
+
+    sx = (int)((double)local_x / scale);
+    sy = (int)((double)local_y / scale);
+    sw = (int)((double)W / scale) + 1;
+    sh = (int)((double)H / scale) + 1;
+
+    if (sx < 0)
+      sx = 0;
+    if (sy < 0)
+      sy = 0;
+    if (sx + sw > frameBuffer->width())
+      sw = frameBuffer->width() - sx;
+    if (sy + sh > frameBuffer->height())
+      sh = frameBuffer->height() - sy;
+
+    if ((sw > 0) && (sh > 0))
+      frameBuffer->draw(dst, sx, sy, sw, sh, X, Y, W, H);
+  }
 }
 
 
@@ -424,21 +525,41 @@ void Viewport::draw()
   if ((W == 0) || (H == 0))
     return;
 
-  frameBuffer->draw(X - x(), Y - y(), X, Y, W, H);
+  int local_x, local_y;
+
+  local_x = X - x();
+  local_y = Y - y();
+
+  if (scale >= 0.999) {
+    frameBuffer->draw(local_x, local_y, X, Y, W, H);
+  } else {
+    int sx, sy, sw, sh;
+
+    sx = (int)((double)local_x / scale);
+    sy = (int)((double)local_y / scale);
+    sw = (int)((double)W / scale) + 1;
+    sh = (int)((double)H / scale) + 1;
+
+    if (sx < 0)
+      sx = 0;
+    if (sy < 0)
+      sy = 0;
+    if (sx + sw > frameBuffer->width())
+      sw = frameBuffer->width() - sx;
+    if (sy + sh > frameBuffer->height())
+      sh = frameBuffer->height() - sy;
+
+    if ((sw > 0) && (sh > 0))
+      frameBuffer->draw(sx, sy, sw, sh, X, Y, W, H);
+  }
 }
 
 
 void Viewport::resize(int x, int y, int w, int h)
 {
-  if ((w != frameBuffer->width()) || (h != frameBuffer->height())) {
-    vlog.debug("Resizing framebuffer from %dx%d to %dx%d",
-               frameBuffer->width(), frameBuffer->height(), w, h);
-
-    frameBuffer = new PlatformPixelBuffer(w, h);
-    assert(frameBuffer);
-    cc->setFramebuffer(frameBuffer);
-  }
-
+  // The framebuffer is sized explicitly via resizeFramebuffer(); here we
+  // only honour the (possibly scaled) widget geometry requested by the
+  // parent window.
   Fl_Widget::resize(x, y, w, h);
 }
 
@@ -484,7 +605,8 @@ int Viewport::handle(int event)
   case FL_LEAVE:
     window()->cursor(FL_CURSOR_DEFAULT);
     // We want a last move event to help trigger edge stuff
-    handlePointerEvent({Fl::event_x() - x(), Fl::event_y() - y()}, 0);
+    handlePointerEvent(mapToFramebuffer({Fl::event_x() - x(),
+                                         Fl::event_y() - y()}), 0);
     return 1;
 
   case FL_PUSH:
@@ -527,11 +649,14 @@ int Viewport::handle(int event)
 
       // A quick press of the wheel "button", followed by a immediate
       // release below
-      handlePointerEvent({Fl::event_x() - x(), Fl::event_y() - y()},
+      handlePointerEvent(mapToFramebuffer({Fl::event_x() - x(),
+                                           Fl::event_y() - y()}),
                          buttonMask | wheelMask);
-    } 
+    }
 
-    handlePointerEvent({Fl::event_x() - x(), Fl::event_y() - y()}, buttonMask);
+    handlePointerEvent(mapToFramebuffer({Fl::event_x() - x(),
+                                         Fl::event_y() - y()}),
+                       buttonMask);
     return 1;
 
   case FL_FOCUS:
@@ -922,7 +1047,9 @@ void Viewport::updateKeyMappingState()
                 break;
               case XK_M:
               case XK_m:
-                popupContextMenu();
+                // Defer so the popup runs outside the keyboard event
+                // dispatch (otherwise the modal menu misbehaves).
+                Fl::add_timeout(0, popupContextMenuTimeout, this);
                 break;
               case XK_KP_Enter:
               case XK_Return:
@@ -1078,6 +1205,15 @@ void Viewport::initContextMenu()
 }
 #pragma GCC diagnostic pop
 
+void Viewport::popupContextMenuTimeout(void *data)
+{
+  Viewport *self = (Viewport *)data;
+
+  Fl::remove_timeout(popupContextMenuTimeout, self);
+
+  self->popupContextMenu();
+}
+
 void Viewport::popupContextMenu()
 {
   const Fl_Menu_Item *m;
@@ -1097,7 +1233,14 @@ void Viewport::popupContextMenu()
   // FLTK also doesn't switch focus properly for menus
   Fl::handle(FL_UNFOCUS, window());
 
-  m = contextMenu->popup();
+  // When invoked from the keyboard shortcut the event coordinates may be
+  // stale or outside the window, so place the menu at the window centre
+  // to make sure it is always visible.
+  int mx, my;
+  mx = window()->x() + window()->w()/2;
+  my = window()->y() + window()->h()/2;
+
+  m = contextMenu->menu()->popup(mx, my);
 
   Fl::handle(FL_FOCUS, window());
 
@@ -1186,37 +1329,37 @@ void Viewport::popupNativeContextMenu()
   HMENU hMenu = CreatePopupMenu();
   if (!hMenu) return;
 
-  AppendMenuW(hMenu, MF_STRING, ID_DISCONNECT, utf8_to_wstring(p_("ContextMenu|", "Disconn&ect")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_DISCONNECT, utf8_to_wstring(C_("ContextMenu|", "Disconn&ect")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
   UINT fsFlags = MF_STRING;
   if (window()->fullscreen_active()) fsFlags |= MF_CHECKED;
-  AppendMenuW(hMenu, fsFlags, ID_FULLSCREEN, utf8_to_wstring(p_("ContextMenu|", "&Full screen")).c_str());
+  AppendMenuW(hMenu, fsFlags, ID_FULLSCREEN, utf8_to_wstring(C_("ContextMenu|", "&Full screen")).c_str());
   
-  AppendMenuW(hMenu, MF_STRING, ID_MINIMIZE, utf8_to_wstring(p_("ContextMenu|", "Minimi&ze")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_MINIMIZE, utf8_to_wstring(C_("ContextMenu|", "Minimi&ze")).c_str());
   
   UINT rsFlags = MF_STRING;
   if (window()->fullscreen_active()) rsFlags |= MF_GRAYED;
-  AppendMenuW(hMenu, rsFlags, ID_RESIZE, utf8_to_wstring(p_("ContextMenu|", "Resize &window to session")).c_str());
+  AppendMenuW(hMenu, rsFlags, ID_RESIZE, utf8_to_wstring(C_("ContextMenu|", "Resize &window to session")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
   UINT ctrlFlags = MF_STRING;
   if (menuCtrlKey) ctrlFlags |= MF_CHECKED;
-  AppendMenuW(hMenu, ctrlFlags, ID_CTRL, utf8_to_wstring(p_("ContextMenu|", "&Ctrl")).c_str());
+  AppendMenuW(hMenu, ctrlFlags, ID_CTRL, utf8_to_wstring(C_("ContextMenu|", "&Ctrl")).c_str());
   
   UINT altFlags = MF_STRING;
   if (menuAltKey) altFlags |= MF_CHECKED;
-  AppendMenuW(hMenu, altFlags, ID_ALT, utf8_to_wstring(p_("ContextMenu|", "&Alt")).c_str());
+  AppendMenuW(hMenu, altFlags, ID_ALT, utf8_to_wstring(C_("ContextMenu|", "&Alt")).c_str());
   
-  AppendMenuW(hMenu, MF_STRING, ID_CTRLALTDEL, utf8_to_wstring(p_("ContextMenu|", "Send Ctrl-Alt-&Del")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_CTRLALTDEL, utf8_to_wstring(C_("ContextMenu|", "Send Ctrl-Alt-&Del")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
-  AppendMenuW(hMenu, MF_STRING, ID_REFRESH, utf8_to_wstring(p_("ContextMenu|", "&Refresh screen")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_REFRESH, utf8_to_wstring(C_("ContextMenu|", "&Refresh screen")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
-  AppendMenuW(hMenu, MF_STRING, ID_OPTIONS, utf8_to_wstring(p_("ContextMenu|", "&Options...")).c_str());
-  AppendMenuW(hMenu, MF_STRING, ID_INFO, utf8_to_wstring(p_("ContextMenu|", "Connection &info...")).c_str());
-  AppendMenuW(hMenu, MF_STRING, ID_ABOUT, utf8_to_wstring(p_("ContextMenu|", "About &TigerVNC...")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_OPTIONS, utf8_to_wstring(C_("ContextMenu|", "&Options...")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_INFO, utf8_to_wstring(C_("ContextMenu|", "Connection &info...")).c_str());
+  AppendMenuW(hMenu, MF_STRING, ID_ABOUT, utf8_to_wstring(C_("ContextMenu|", "About &TigerVNC...")).c_str());
 
   POINT pos;
   GetCursorPos(&pos);

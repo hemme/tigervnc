@@ -57,6 +57,19 @@ public:
   // Most efficient format (from Viewport's point of view)
   const rfb::PixelFormat &getPreferredPF();
 
+  // Native (server) framebuffer dimensions, which may differ from the
+  // widget size when the desktop is scaled to fit the window.
+  int framebufferWidth() const;
+  int framebufferHeight() const;
+
+  // Recreate the framebuffer to the given (native) dimensions and
+  // resize the widget to the scaled visual size.
+  void resizeFramebuffer(int w, int h);
+
+  // Visual scale factor applied when rendering (1.0 == unscaled).
+  void setScale(double s);
+  double getScale() const { return scale; }
+
   // Flush updates to screen
   void updateWindow();
 
@@ -88,6 +101,10 @@ protected:
 private:
   bool hasFocus();
 
+  // Convert a widget-local (scaled) coordinate to native framebuffer
+  // coordinates, taking the current scale factor into account.
+  core::Point mapToFramebuffer(const core::Point& p) const;
+
   // Show the currently set (or system) cursor
   void showCursor();
 
@@ -113,12 +130,16 @@ private:
 
   void initContextMenu();
 
+  static void popupContextMenuTimeout(void *data);
+
   static void handleOptions(void *data);
 
 private:
   CConn* cc;
 
   PlatformPixelBuffer* frameBuffer;
+
+  double scale;
 
   core::Point lastPointerPos;
   uint16_t lastButtonMask;

@@ -54,6 +54,11 @@ protected:
   void loadOptions(void);
   void storeOptions(void);
 
+  // Returns a warning string if any of the selected shortcut modifiers
+  // (given as a ShortcutHandler modifier mask) is also a source key in
+  // a key mapping rule (which would break local shortcut detection).
+  std::string conflictingShortcutWarning(unsigned mask);
+
   void createCompressionPage(int tx, int ty, int tw, int th);
   void createSecurityPage(int tx, int ty, int tw, int th);
   void createInputPage(int tx, int ty, int tw, int th);
@@ -149,6 +154,7 @@ protected:
   Fl_Toggle_Button *superButton;
 
   Fl_Box *shortcutsText;
+  Fl_Box *shortcutsWarning;
   Fl_Multiline_Input *keyMappingsInput;
 
   /* Display */
@@ -158,6 +164,7 @@ protected:
   Fl_Round_Button *allMonitorsButton;
   Fl_Round_Button *selectedMonitorsButton;
   Fl_Monitor_Arrangement *monitorArrangement;
+  Fl_Check_Button *fitToWindowCheckbox;
 
   /* Misc. */
   Fl_Check_Button *sharedCheckbox;

@@ -111,6 +111,8 @@ private:
   static void reconfigureFullscreen(void *data);
   void remoteResize();
 
+  void recomputeFitScale();
+
   void repositionWidgets();
 
   static void handleClose(Fl_Widget *wnd, void *data);

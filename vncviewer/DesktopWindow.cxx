@@ -229,6 +229,7 @@ DesktopWindow::DesktopWindow(int w, int h, CConn* cc_)
 #endif
 
   // Adjust layout now that we're visible and know our final size
+  recomputeFitScale();
   repositionWidgets();
 
   // Throughput graph for debugging
@@ -407,7 +408,8 @@ void DesktopWindow::resizeFramebuffer(int new_w, int new_h)
 {
   bool maximized;
 
-  if ((new_w == viewport->w()) && (new_h == viewport->h()))
+  if ((new_w == viewport->framebufferWidth()) &&
+      (new_h == viewport->framebufferHeight()))
     return;
 
   maximized = false;
@@ -430,13 +432,15 @@ void DesktopWindow::resizeFramebuffer(int new_w, int new_h)
   // If we're letting the viewport match the window perfectly, then
   // keep things that way for the new size, otherwise just keep things
   // like they are.
-  if (!fullscreen_active() && !maximized) {
-    if ((w() == viewport->w()) && (h() == viewport->h()))
+  if (!fullscreen_active() && !maximized && !fitToWindow) {
+    if ((w() == viewport->framebufferWidth()) &&
+        (h() == viewport->framebufferHeight()))
       size(new_w, new_h);
   }
 
-  viewport->size(new_w, new_h);
+  viewport->resizeFramebuffer(new_w, new_h);
 
+  recomputeFitScale();
   repositionWidgets();
 }
 
@@ -466,17 +470,21 @@ void DesktopWindow::setCursorPos(const core::Point& pos)
     // Do nothing if we do not have the mouse captured.
     return;
   }
+  // Scale the server-side cursor position to the on-screen viewport
+  double s = viewport->getScale();
+  int px = (int)(pos.x * s);
+  int py = (int)(pos.y * s);
 #if defined(WIN32)
-  SetCursorPos(pos.x + x_root() + viewport->x(),
-               pos.y + y_root() + viewport->y());
+  SetCursorPos(px + x_root() + viewport->x(),
+               py + y_root() + viewport->y());
 #elif defined(__APPLE__)
   CGPoint new_pos;
-  new_pos.x = pos.x + x_root() + viewport->x();
-  new_pos.y = pos.y + y_root() + viewport->y();
+  new_pos.x = px + x_root() + viewport->x();
+  new_pos.y = py + y_root() + viewport->y();
   CGWarpMouseCursorPosition(new_pos);
 #else // Assume this is Xlib
-  x11_warp_pointer(pos.x + x_root() + viewport->x(),
-                   pos.y + y_root() + viewport->y());
+  x11_warp_pointer(px + x_root() + viewport->x(),
+                   py + y_root() + viewport->y());
 #endif
 }
 
@@ -726,6 +734,8 @@ void DesktopWindow::resize(int x, int y, int w, int h)
   Fl_Window::resize(x, y, w, h);
 
   if (resizing) {
+    recomputeFitScale();
+
     remoteResize();
 
     repositionWidgets();
@@ -1357,6 +1367,11 @@ void DesktopWindow::remoteResize()
   if (viewOnly)
     return;
 
+  // When fitting the desktop to the window we keep the remote desktop at
+  // its native size and scale locally, so don't ask the server to resize.
+  if (fitToWindow)
+    return;
+
   if (!::remoteResize)
     return;
   if (!cc->server.supportsSetDesktopSize)
@@ -1517,6 +1532,44 @@ void DesktopWindow::remoteResize()
 }
 
 
+void DesktopWindow::recomputeFitScale()
+{
+  double oldScale;
+  int fw, fh;
+  double s;
+
+  oldScale = viewport->getScale();
+
+  fw = viewport->framebufferWidth();
+  fh = viewport->framebufferHeight();
+
+  if (!fitToWindow) {
+    s = 1.0;
+    viewport->setScale(1.0);
+  } else {
+    double sx, sy;
+
+    if ((fw <= 0) || (fh <= 0))
+      return;
+
+    sx = (double)w() / fw;
+    sy = (double)h() / fh;
+    s = std::min(sx, sy);
+
+    // Only ever zoom out to fit, never zoom in
+    if (s > 1.0)
+      s = 1.0;
+    if (s < 0.01)
+      s = 0.01;
+
+    viewport->setScale(s);
+  }
+
+  if (viewport->getScale() != oldScale)
+    damage(FL_DAMAGE_ALL);
+}
+
+
 void DesktopWindow::repositionWidgets()
 {
   int new_x, new_y;
@@ -1612,6 +1665,12 @@ void DesktopWindow::handleClose(Fl_Widget* /*wnd*/, void* /*data*/)
 void DesktopWindow::handleOptions(void *data)
 {
   DesktopWindow *self = (DesktopWindow*)data;
+
+  // Re-evaluate the fit-to-window scale as options (including the
+  // FitToWindow setting itself) may have changed.
+  self->recomputeFitScale();
+  self->repositionWidgets();
+  self->redraw();
 
   // Call fullscreen_on even if active since it handles
   // fullScreenMode

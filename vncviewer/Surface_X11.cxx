@@ -61,6 +61,62 @@ void Surface::draw(Surface* dst, int src_x, int src_y,
                    src_x, src_y, 0, 0, dst_x, dst_y, dst_w, dst_h);
 }
 
+void Surface::draw(int src_x, int src_y, int src_w, int src_h,
+                   int dst_x, int dst_y, int dst_w, int dst_h)
+{
+  Picture winPict;
+  XTransform xt;
+
+  if ((dst_w <= 0) || (dst_h <= 0))
+    return;
+
+  memset(&xt, 0, sizeof(xt));
+  xt.matrix[0][0] = XDoubleToFixed((double)src_w / dst_w);
+  xt.matrix[0][2] = XDoubleToFixed((double)src_x);
+  xt.matrix[1][1] = XDoubleToFixed((double)src_h / dst_h);
+  xt.matrix[1][2] = XDoubleToFixed((double)src_y);
+  xt.matrix[2][2] = XDoubleToFixed(1.0);
+  XRenderSetPictureTransform(fl_display, picture, &xt);
+
+  winPict = XRenderCreatePicture(fl_display, fl_window, visFormat, 0, nullptr);
+  XRenderComposite(fl_display, PictOpSrc, picture, None, winPict,
+                   0, 0, 0, 0, dst_x, dst_y, dst_w, dst_h);
+  XRenderFreePicture(fl_display, winPict);
+
+  // Restore identity transform
+  memset(&xt, 0, sizeof(xt));
+  xt.matrix[0][0] = XDoubleToFixed(1.0);
+  xt.matrix[1][1] = XDoubleToFixed(1.0);
+  xt.matrix[2][2] = XDoubleToFixed(1.0);
+  XRenderSetPictureTransform(fl_display, picture, &xt);
+}
+
+void Surface::draw(Surface* dst, int src_x, int src_y, int src_w, int src_h,
+                   int dst_x, int dst_y, int dst_w, int dst_h)
+{
+  XTransform xt;
+
+  if ((dst_w <= 0) || (dst_h <= 0))
+    return;
+
+  memset(&xt, 0, sizeof(xt));
+  xt.matrix[0][0] = XDoubleToFixed((double)src_w / dst_w);
+  xt.matrix[0][2] = XDoubleToFixed((double)src_x);
+  xt.matrix[1][1] = XDoubleToFixed((double)src_h / dst_h);
+  xt.matrix[1][2] = XDoubleToFixed((double)src_y);
+  xt.matrix[2][2] = XDoubleToFixed(1.0);
+  XRenderSetPictureTransform(fl_display, picture, &xt);
+
+  XRenderComposite(fl_display, PictOpSrc, picture, None, dst->picture,
+                   0, 0, 0, 0, dst_x, dst_y, dst_w, dst_h);
+
+  memset(&xt, 0, sizeof(xt));
+  xt.matrix[0][0] = XDoubleToFixed(1.0);
+  xt.matrix[1][1] = XDoubleToFixed(1.0);
+  xt.matrix[2][2] = XDoubleToFixed(1.0);
+  XRenderSetPictureTransform(fl_display, picture, &xt);
+}
+
 static Picture alpha_mask(int a)
 {
   Pixmap pixmap;

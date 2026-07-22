@@ -53,11 +53,15 @@ public:
   static unsigned parseModifier(const char* key);
   static const char* modifierString(unsigned key);
 
+  // Returns the modifier bit (Control/Shift/Alt/Super) for a keysym
+  // name (e.g. "Alt_L"), or 0 if it is not a modifier.
+  static unsigned keyNameToModifier(const char* name);
+
   static const char* modifierPrefix(unsigned mask,
                                     bool justPrefix=false);
 
 private:
-  unsigned keySymToModifier(uint32_t keySym);
+  static unsigned keySymToModifier(uint32_t keySym);
 
 private:
   unsigned modifierMask;
