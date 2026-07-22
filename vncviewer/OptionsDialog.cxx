@@ -383,6 +383,8 @@ void OptionsDialog::loadOptions(void)
     cursorTypeChoice->value(0);
   }
   handleAlwaysCursor(alwaysCursorCheckbox, this);
+
+  keyMappingsInput->value(keyMappings);
 }
 
 
