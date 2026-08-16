@@ -40,6 +40,7 @@
 #ifndef XK_VoidSymbol
 #define XK_LATIN1
 #define XK_MISCELLANY
+#define XK_XKB_KEYS
 #include <rfb/keysymdef.h>
 #endif
 
@@ -62,6 +63,7 @@
 #include <rfb/keysymdef.h>
 
 #include "PlatformPixelBuffer.h"
+#include "keysym2ucs.h"
 
 #include <FL/fl_draw.H>
 #include <FL/fl_ask.H>
@@ -100,7 +102,8 @@ static core::LogWriter vlog("Viewport");
 
 enum { ID_DISCONNECT, ID_FULLSCREEN, ID_MINIMIZE, ID_RESIZE,
        ID_CTRL, ID_ALT, ID_CTRLALTDEL,
-       ID_REFRESH, ID_OPTIONS, ID_INFO, ID_ABOUT };
+       ID_REFRESH, ID_OPTIONS, ID_INFO, ID_ABOUT,
+       ID_SENDCLIPBOARD };
 
 // Used for fake key presses from the menu
 static const int FAKE_CTRL_KEY_CODE = 0x10001;
@@ -110,13 +113,19 @@ static const int FAKE_DEL_KEY_CODE = 0x10003;
 // Used for fake key presses for lock key sync
 static const int FAKE_KEY_CODE = 0xffff;
 
+// Used for fake key presses for clipboard strokes
+static const int FAKE_STROKE_KEY_CODE = 0xfffe;
+static const double STROKE_INTERVAL = 0.010;
+
 Viewport::Viewport(int w, int h, CConn* cc_)
   : Fl_Widget(0, 0, w, h), cc(cc_), frameBuffer(nullptr),
     scale(1.0),
     lastPointerPos(0, 0), lastButtonMask(0),
     keyboard(nullptr), shortcutBypass(false), shortcutActive(false),
     firstLEDState(true), pendingClientClipboard(false),
-    menuCtrlKey(false), menuAltKey(false), cursor(nullptr),
+    menuCtrlKey(false), menuAltKey(false),
+    strokeRequestPending(false), strokeSending(false), strokePos(0),
+    cursor(nullptr),
     cursorIsBlank(false)
 {
 #if defined(WIN32)
@@ -172,6 +181,8 @@ Viewport::~Viewport()
 {
   // Unregister all timeouts in case they get a change tro trigger
   // again later when this object is already gone.
+  stopClipboardStrokes();
+
   Fl::remove_timeout(handlePointerTimeout, this);
   Fl::remove_timeout(popupContextMenuTimeout, this);
 
@@ -571,6 +582,17 @@ int Viewport::handle(int event)
 
   switch (event) {
   case FL_PASTE:
+    if (strokeRequestPending) {
+      strokeRequestPending = false;
+      if (!core::isValidUTF8(Fl::event_text(), Fl::event_length())) {
+        vlog.error(_("Invalid UTF-8 sequence in clipboard"));
+        return 1;
+      }
+      sendClipboardStrokes(core::convertLF(Fl::event_text(),
+                                           Fl::event_length()));
+      return 1;
+    }
+
     if (!core::isValidUTF8(Fl::event_text(), Fl::event_length())) {
       vlog.error(_("Invalid UTF-8 sequence in clipboard"));
       // Reset the state as if we don't have any clipboard data at all
@@ -614,6 +636,10 @@ int Viewport::handle(int event)
   case FL_DRAG:
   case FL_MOVE:
   case FL_MOUSEWHEEL:
+    if ((event == FL_PUSH) || (event == FL_RELEASE) ||
+        (event == FL_MOUSEWHEEL))
+      stopClipboardStrokes();
+
     buttonMask = 0;
     if (Fl::event_button1())
       buttonMask |= 1 << 0;
@@ -816,8 +842,161 @@ void Viewport::handlePointerTimeout(void *data)
 }
 
 
+static bool isRepeatableKeySym(uint32_t keySym)
+{
+  switch (keySym) {
+  // Modifiers
+  case XK_Shift_L:
+  case XK_Shift_R:
+  case XK_Shift_Lock:
+  case XK_Control_L:
+  case XK_Control_R:
+  case XK_Caps_Lock:
+  case XK_Meta_L:
+  case XK_Meta_R:
+  case XK_Alt_L:
+  case XK_Alt_R:
+  case XK_Super_L:
+  case XK_Super_R:
+  case XK_Hyper_L:
+  case XK_Hyper_R:
+  case XK_Num_Lock:
+  case XK_Scroll_Lock:
+  case XK_Kana_Lock:
+  case XK_ISO_Level2_Latch:
+  case XK_ISO_Level3_Shift:
+  case XK_ISO_Level3_Latch:
+  case XK_ISO_Level5_Shift:
+  case XK_ISO_Level5_Latch:
+  case XK_ISO_Group_Latch:
+  case XK_ISO_Group_Lock:
+  case XK_Mode_switch:
+    return false;
+  default:
+    return true;
+  }
+}
+
+static uint32_t utf8Decode(const std::string& str, size_t& pos)
+{
+  uint32_t ucs;
+
+  if (pos >= str.size())
+    return 0xfffd;
+
+  unsigned char c = str[pos];
+  if (c < 0x80) {
+    pos++;
+    return c;
+  } else if ((c & 0xe0) == 0xc0) {
+    ucs = c & 0x1f;
+    if (pos + 1 >= str.size() || (str[pos+1] & 0xc0) != 0x80) {
+      pos++;
+      return 0xfffd;
+    }
+    ucs = (ucs << 6) | (str[pos+1] & 0x3f);
+    pos += 2;
+  } else if ((c & 0xf0) == 0xe0) {
+    ucs = c & 0x0f;
+    if (pos + 2 >= str.size() || (str[pos+1] & 0xc0) != 0x80 ||
+        (str[pos+2] & 0xc0) != 0x80) {
+      pos++;
+      return 0xfffd;
+    }
+    ucs = (ucs << 12) | ((str[pos+1] & 0x3f) << 6) | (str[pos+2] & 0x3f);
+    pos += 3;
+  } else if ((c & 0xf8) == 0xf0) {
+    ucs = c & 0x07;
+    if (pos + 3 >= str.size() || (str[pos+1] & 0xc0) != 0x80 ||
+        (str[pos+2] & 0xc0) != 0x80 || (str[pos+3] & 0xc0) != 0x80) {
+      pos++;
+      return 0xfffd;
+    }
+    ucs = (ucs << 18) | ((str[pos+1] & 0x3f) << 12) |
+          ((str[pos+2] & 0x3f) << 6) | (str[pos+3] & 0x3f);
+    pos += 4;
+  } else {
+    pos++;
+    return 0xfffd;
+  }
+
+  return ucs;
+}
+
+void Viewport::sendClipboardStrokes(const std::string& text)
+{
+  stopClipboardStrokes();
+
+  if (text.empty())
+    return;
+
+  // Make sure no modifiers are latched on the host, and that our menu
+  // toggles are consistent with that
+  resetKeyboard();
+  menuCtrlKey = false;
+  menuAltKey = false;
+
+  strokeQueue = text;
+  strokePos = 0;
+  strokeSending = true;
+
+  vlog.debug("Sending %d bytes as keystrokes", (int)strokeQueue.size());
+
+  Fl::add_timeout(STROKE_INTERVAL, sendClipboardStrokesTimeout, this);
+}
+
+void Viewport::sendClipboardStrokesTimeout(void *data)
+{
+  Viewport *self = (Viewport *)data;
+
+  assert(self);
+
+  if (!self->strokeSending)
+    return;
+
+  uint32_t ucs = utf8Decode(self->strokeQueue, self->strokePos);
+  uint32_t ks;
+
+  if (ucs == '\n')
+    ks = XK_Return;
+  else if (ucs == '\t')
+    ks = XK_Tab;
+  else
+    ks = ucs2keysym(ucs);
+
+  if (ks == NoSymbol)
+    vlog.debug("Skipping character without keysym");
+  else {
+    self->sendKeyPress(FAKE_STROKE_KEY_CODE, 0, ks);
+    self->sendKeyRelease(FAKE_STROKE_KEY_CODE);
+  }
+
+  if (self->strokePos >= self->strokeQueue.size())
+    self->stopClipboardStrokes();
+  else
+    Fl::repeat_timeout(STROKE_INTERVAL, sendClipboardStrokesTimeout, data);
+}
+
+void Viewport::stopClipboardStrokes()
+{
+  // Always clear this, even when idle, so a stale request doesn't
+  // hijack a future FL_PASTE
+  strokeRequestPending = false;
+
+  if (!strokeSending)
+    return;
+
+  strokeSending = false;
+  strokeQueue.clear();
+  strokePos = 0;
+
+  Fl::remove_timeout(sendClipboardStrokesTimeout, this);
+}
+
 void Viewport::resetKeyboard()
 {
+  stopClipboardStrokes();
+
   try {
     cc->releaseAllKeys();
   } catch (std::exception& e) {
@@ -837,6 +1016,8 @@ void Viewport::resetKeyboard()
   serverPressedKeysyms.clear();
   keysymToSentSystemKeyCode.clear();
   keysymToPhysicalEvent.clear();
+  keyRepeatParity.clear();
+  physicalKeyToSentKeys.clear();
 }
 
 static std::vector<std::string> splitString(const std::string& s, char delim) {
@@ -923,6 +1104,10 @@ void Viewport::updateKeyMappingState()
 {
   std::set<uint32_t> matchedSourceKeys;
   std::set<uint32_t> desiredServerKeys;
+  // Server keysym -> physical system key code it originates from (only
+  // set when the origin is unambiguous, i.e. pass-through keys and
+  // single-source mappings)
+  std::map<uint32_t, int> repeatAttribution;
 
   for (const auto& mapping : keyMappingsList) {
     bool match = true;
@@ -940,12 +1125,24 @@ void Viewport::updateKeyMappingState()
       for (uint32_t tk : mapping.targetKeys) {
         desiredServerKeys.insert(tk);
       }
+      if (mapping.sourceKeys.size() == 1) {
+        uint32_t sk = *mapping.sourceKeys.begin();
+        auto physIter = keysymToPhysicalEvent.find(sk);
+        if (physIter != keysymToPhysicalEvent.end()) {
+          for (uint32_t tk : mapping.targetKeys) {
+            repeatAttribution[tk] = physIter->second.systemKeyCode;
+          }
+        }
+      }
     }
   }
 
   for (uint32_t pk : physicalPressedKeysyms) {
     if (matchedSourceKeys.find(pk) == matchedSourceKeys.end()) {
       desiredServerKeys.insert(pk);
+      auto physIter = keysymToPhysicalEvent.find(pk);
+      if (physIter != keysymToPhysicalEvent.end())
+        repeatAttribution[pk] = physIter->second.systemKeyCode;
     }
   }
 
@@ -957,6 +1154,16 @@ void Viewport::updateKeyMappingState()
     }
   }
   for (uint32_t rk : keysToRelease) {
+    // Drop any client-side repeat attribution for this server keysym
+    for (auto attrIter = physicalKeyToSentKeys.begin();
+         attrIter != physicalKeyToSentKeys.end();) {
+      attrIter->second.erase(rk);
+      if (attrIter->second.empty())
+        physicalKeyToSentKeys.erase(attrIter++);
+      else
+        ++attrIter;
+    }
+
     auto sentIter = keysymToSentSystemKeyCode.find(rk);
     if (sentIter != keysymToSentSystemKeyCode.end()) {
       int systemKeyCode = sentIter->second;
@@ -1068,11 +1275,17 @@ void Viewport::updateKeyMappingState()
         sendKeyPress(systemKeyCode, keyCode, dk);
         serverPressedKeysyms.insert(dk);
         keysymToSentSystemKeyCode[dk] = systemKeyCode;
+        auto attrIter = repeatAttribution.find(dk);
+        if (attrIter != repeatAttribution.end())
+          physicalKeyToSentKeys[attrIter->second][dk] = systemKeyCode;
       } else {
         int systemKeyCode = 0x10000 + dk;
         sendKeyPress(systemKeyCode, 0, dk);
         serverPressedKeysyms.insert(dk);
         keysymToSentSystemKeyCode[dk] = systemKeyCode;
+        auto attrIter = repeatAttribution.find(dk);
+        if (attrIter != repeatAttribution.end())
+          physicalKeyToSentKeys[attrIter->second][dk] = systemKeyCode;
       }
     }
   }
@@ -1081,6 +1294,21 @@ void Viewport::updateKeyMappingState()
 void Viewport::handleKeyPress(int systemKeyCode,
                               uint32_t keyCode, uint32_t keySym)
 {
+  stopClipboardStrokes();
+
+  // System-generated key repeat (the key is already pressed). Forward
+  // every other repeat to the host so that its effective repeat rate is
+  // half of the local (e.g. Windows) one.
+  if (pressedKeys.count(systemKeyCode)) {
+    if (isRepeatableKeySym(keySym)) {
+      bool& parity = keyRepeatParity[systemKeyCode];
+      parity = !parity;
+      if (parity)
+        sendKeyRepeat(systemKeyCode);
+    }
+    return;
+  }
+
   pressedKeys.insert(systemKeyCode);
 
   physicalPressedKeysyms.insert(keySym);
@@ -1107,6 +1335,9 @@ void Viewport::sendKeyPress(int systemKeyCode,
 void Viewport::handleKeyRelease(int systemKeyCode)
 {
   pressedKeys.erase(systemKeyCode);
+
+  keyRepeatParity.erase(systemKeyCode);
+  physicalKeyToSentKeys.erase(systemKeyCode);
 
   if (pressedKeys.empty())
     shortcutActive = false;
@@ -1136,6 +1367,28 @@ void Viewport::sendKeyRelease(int systemKeyCode)
   } catch (std::exception& e) {
     vlog.error("%s", e.what());
     abort_connection_with_unexpected_error(e);
+  }
+}
+
+void Viewport::sendKeyRepeat(int systemKeyCode)
+{
+  auto attrIter = physicalKeyToSentKeys.find(systemKeyCode);
+  if (attrIter == physicalKeyToSentKeys.end())
+    return;
+
+  // The host considers these keys already pressed, so a repeat has to be
+  // a full release/press cycle with the same keysym
+  for (const auto& kv : attrIter->second) {
+    uint32_t keySym = kv.first;
+    int sentCode = kv.second;
+
+    uint32_t keyCode = 0;
+    auto physIter = keysymToPhysicalEvent.find(keySym);
+    if (physIter != keysymToPhysicalEvent.end())
+      keyCode = physIter->second.keyCode;
+
+    sendKeyRelease(sentCode);
+    sendKeyPress(sentCode, keyCode, keySym);
   }
 }
 
@@ -1191,7 +1444,12 @@ void Viewport::initContextMenu()
                 FL_MENU_TOGGLE | (menuAltKey?FL_MENU_VALUE:0));
 
   fltk_menu_add(contextMenu, C_("ContextMenu|", "Send Ctrl-Alt-&Del"),
-                0, nullptr, (void*)ID_CTRLALTDEL, FL_MENU_DIVIDER);
+                0, nullptr, (void*)ID_CTRLALTDEL, 0);
+
+  fltk_menu_add(contextMenu, C_("ContextMenu|",
+                                "&Send strokes from clipboard"),
+                0, nullptr, (void*)ID_SENDCLIPBOARD,
+                (viewOnly ? FL_MENU_INACTIVE : 0) | FL_MENU_DIVIDER);
 
   fltk_menu_add(contextMenu, C_("ContextMenu|", "&Refresh screen"),
                 0, nullptr, (void*)ID_REFRESH, FL_MENU_DIVIDER);
@@ -1307,6 +1565,20 @@ void Viewport::executeMenuAction(int id, bool toggleValue)
     sendKeyRelease(FAKE_ALT_KEY_CODE);
     sendKeyRelease(FAKE_CTRL_KEY_CODE);
     break;
+  case ID_SENDCLIPBOARD:
+    if (viewOnly)
+      break;
+    if (strokeSending) {
+      stopClipboardStrokes();
+      break;
+    }
+    if (!Fl::clipboard_contains(Fl::clipboard_plain_text)) {
+      vlog.debug("No plain text in local clipboard, ignoring");
+      break;
+    }
+    strokeRequestPending = true;
+    Fl::paste(*this, 1);
+    break;
   case ID_REFRESH:
     cc->refreshFramebuffer();
     break;
@@ -1352,6 +1624,12 @@ void Viewport::popupNativeContextMenu()
   AppendMenuW(hMenu, altFlags, ID_ALT, utf8_to_wstring(C_("ContextMenu|", "&Alt")).c_str());
   
   AppendMenuW(hMenu, MF_STRING, ID_CTRLALTDEL, utf8_to_wstring(C_("ContextMenu|", "Send Ctrl-Alt-&Del")).c_str());
+
+  UINT scFlags = MF_STRING;
+  if (viewOnly) scFlags |= MF_GRAYED;
+  AppendMenuW(hMenu, scFlags, ID_SENDCLIPBOARD,
+              utf8_to_wstring(C_("ContextMenu|",
+                                 "&Send strokes from clipboard")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
   AppendMenuW(hMenu, MF_STRING, ID_REFRESH, utf8_to_wstring(C_("ContextMenu|", "&Refresh screen")).c_str());

@@ -41,6 +41,7 @@ endif()
 
 if(NOT BUILD_TIMESTAMP)
   STRING(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d %H:%M" UTC)
+  set(BUILD_TIMESTAMP "${BUILD_TIMESTAMP}" CACHE STRING "Build timestamp")
 endif()
 
 # Default to optimised builds instead of debug ones. Our code has no bugs ;)

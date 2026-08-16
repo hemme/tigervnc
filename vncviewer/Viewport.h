@@ -117,12 +117,17 @@ private:
 
   void resetKeyboard();
 
+  void sendClipboardStrokes(const std::string& text);
+  void stopClipboardStrokes();
+  static void sendClipboardStrokesTimeout(void *data);
+
   void handleKeyPress(int systemKeyCode,
                       uint32_t keyCode, uint32_t keySym) override;
   void sendKeyPress(int systemKeyCode,
                     uint32_t keyCode, uint32_t keySym);
   void handleKeyRelease(int systemKeyCode) override;
   void sendKeyRelease(int systemKeyCode);
+  void sendKeyRepeat(int systemKeyCode);
 
   static int handleSystemEvent(void *event, void *data);
 
@@ -161,6 +166,11 @@ private:
   bool menuCtrlKey;
   bool menuAltKey;
 
+  bool strokeRequestPending;
+  bool strokeSending;
+  std::string strokeQueue;
+  size_t strokePos;
+
   Fl_RGB_Image *cursor;
   core::Point cursorHotspot;
   bool cursorIsBlank;
@@ -174,6 +184,18 @@ private:
   std::map<int, uint32_t> physicalKeyToKeysym;
   std::set<uint32_t> serverPressedKeysyms;
   std::map<uint32_t, int> keysymToSentSystemKeyCode;
+
+  // Client-side key repeat: toggled once per repeated key event so that
+  // only every other system repeat is forwarded to the host (half the
+  // local repeat rate)
+  std::map<int, bool> keyRepeatParity;
+
+  // Physical system key code -> server keysyms it is currently sent as,
+  // and the system key code actually used for each of those keysyms
+  // (needed to repeat keys sent under a synthetic code because of key
+  // mappings)
+  std::map<int, std::map<uint32_t, int>> physicalKeyToSentKeys;
+
   struct PhysicalKeyEvent {
     int systemKeyCode;
     uint32_t keyCode;
