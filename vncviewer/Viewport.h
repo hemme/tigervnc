@@ -39,6 +39,7 @@ class Fl_RGB_Image;
 class CConn;
 class Keyboard;
 class PlatformPixelBuffer;
+class SendTextDialog;
 class Surface;
 
 class Viewport : public Fl_Widget, protected EmulateMB,
@@ -117,9 +118,12 @@ private:
 
   void resetKeyboard();
 
-  void sendClipboardStrokes(const std::string& text);
-  void stopClipboardStrokes();
-  static void sendClipboardStrokesTimeout(void *data);
+  void sendTextStrokes(const std::string& text);
+  void stopTextStrokes();
+  static void sendTextStrokesTimeout(void *data);
+
+  void showSendTextDialog();
+  static void sendTextFromDialog(const std::string& text, void *data);
 
   void handleKeyPress(int systemKeyCode,
                       uint32_t keyCode, uint32_t keySym) override;
@@ -163,10 +167,11 @@ private:
 
   Fl_Menu_Button *contextMenu;
 
+  SendTextDialog *sendTextDialog;
+
   bool menuCtrlKey;
   bool menuAltKey;
 
-  bool strokeRequestPending;
   bool strokeSending;
   std::string strokeQueue;
   size_t strokePos;

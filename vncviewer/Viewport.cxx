@@ -53,6 +53,7 @@
 #include "Viewport.h"
 #include "CConn.h"
 #include "OptionsDialog.h"
+#include "SendTextDialog.h"
 #include "DesktopWindow.h"
 #include "parameters.h"
 #include "vncviewer.h"
@@ -103,7 +104,7 @@ static core::LogWriter vlog("Viewport");
 enum { ID_DISCONNECT, ID_FULLSCREEN, ID_MINIMIZE, ID_RESIZE,
        ID_CTRL, ID_ALT, ID_CTRLALTDEL,
        ID_REFRESH, ID_OPTIONS, ID_INFO, ID_ABOUT,
-       ID_SENDCLIPBOARD };
+       ID_SENDTEXT };
 
 // Used for fake key presses from the menu
 static const int FAKE_CTRL_KEY_CODE = 0x10001;
@@ -113,7 +114,7 @@ static const int FAKE_DEL_KEY_CODE = 0x10003;
 // Used for fake key presses for lock key sync
 static const int FAKE_KEY_CODE = 0xffff;
 
-// Used for fake key presses for clipboard strokes
+// Used for fake key presses when sending text as keystrokes
 static const int FAKE_STROKE_KEY_CODE = 0xfffe;
 static const double STROKE_INTERVAL = 0.010;
 
@@ -123,8 +124,9 @@ Viewport::Viewport(int w, int h, CConn* cc_)
     lastPointerPos(0, 0), lastButtonMask(0),
     keyboard(nullptr), shortcutBypass(false), shortcutActive(false),
     firstLEDState(true), pendingClientClipboard(false),
+    sendTextDialog(nullptr),
     menuCtrlKey(false), menuAltKey(false),
-    strokeRequestPending(false), strokeSending(false), strokePos(0),
+    strokeSending(false), strokePos(0),
     cursor(nullptr),
     cursorIsBlank(false)
 {
@@ -181,7 +183,12 @@ Viewport::~Viewport()
 {
   // Unregister all timeouts in case they get a change tro trigger
   // again later when this object is already gone.
-  stopClipboardStrokes();
+  stopTextStrokes();
+
+  if (sendTextDialog) {
+    sendTextDialog->hide();
+    delete sendTextDialog;
+  }
 
   Fl::remove_timeout(handlePointerTimeout, this);
   Fl::remove_timeout(popupContextMenuTimeout, this);
@@ -582,17 +589,6 @@ int Viewport::handle(int event)
 
   switch (event) {
   case FL_PASTE:
-    if (strokeRequestPending) {
-      strokeRequestPending = false;
-      if (!core::isValidUTF8(Fl::event_text(), Fl::event_length())) {
-        vlog.error(_("Invalid UTF-8 sequence in clipboard"));
-        return 1;
-      }
-      sendClipboardStrokes(core::convertLF(Fl::event_text(),
-                                           Fl::event_length()));
-      return 1;
-    }
-
     if (!core::isValidUTF8(Fl::event_text(), Fl::event_length())) {
       vlog.error(_("Invalid UTF-8 sequence in clipboard"));
       // Reset the state as if we don't have any clipboard data at all
@@ -638,7 +634,7 @@ int Viewport::handle(int event)
   case FL_MOUSEWHEEL:
     if ((event == FL_PUSH) || (event == FL_RELEASE) ||
         (event == FL_MOUSEWHEEL))
-      stopClipboardStrokes();
+      stopTextStrokes();
 
     buttonMask = 0;
     if (Fl::event_button1())
@@ -923,9 +919,9 @@ static uint32_t utf8Decode(const std::string& str, size_t& pos)
   return ucs;
 }
 
-void Viewport::sendClipboardStrokes(const std::string& text)
+void Viewport::sendTextStrokes(const std::string& text)
 {
-  stopClipboardStrokes();
+  stopTextStrokes();
 
   if (text.empty())
     return;
@@ -942,10 +938,10 @@ void Viewport::sendClipboardStrokes(const std::string& text)
 
   vlog.debug("Sending %d bytes as keystrokes", (int)strokeQueue.size());
 
-  Fl::add_timeout(STROKE_INTERVAL, sendClipboardStrokesTimeout, this);
+  Fl::add_timeout(STROKE_INTERVAL, sendTextStrokesTimeout, this);
 }
 
-void Viewport::sendClipboardStrokesTimeout(void *data)
+void Viewport::sendTextStrokesTimeout(void *data)
 {
   Viewport *self = (Viewport *)data;
 
@@ -972,17 +968,13 @@ void Viewport::sendClipboardStrokesTimeout(void *data)
   }
 
   if (self->strokePos >= self->strokeQueue.size())
-    self->stopClipboardStrokes();
+    self->stopTextStrokes();
   else
-    Fl::repeat_timeout(STROKE_INTERVAL, sendClipboardStrokesTimeout, data);
+    Fl::repeat_timeout(STROKE_INTERVAL, sendTextStrokesTimeout, data);
 }
 
-void Viewport::stopClipboardStrokes()
+void Viewport::stopTextStrokes()
 {
-  // Always clear this, even when idle, so a stale request doesn't
-  // hijack a future FL_PASTE
-  strokeRequestPending = false;
-
   if (!strokeSending)
     return;
 
@@ -990,12 +982,35 @@ void Viewport::stopClipboardStrokes()
   strokeQueue.clear();
   strokePos = 0;
 
-  Fl::remove_timeout(sendClipboardStrokesTimeout, this);
+  Fl::remove_timeout(sendTextStrokesTimeout, this);
+}
+
+void Viewport::showSendTextDialog()
+{
+  // Non-modal: the user can click into the VNC session to focus the
+  // remote window before hitting "Send". Calling show() on an already
+  // open dialog just raises it.
+  if (!sendTextDialog)
+    sendTextDialog = new SendTextDialog(sendTextFromDialog, this);
+
+  sendTextDialog->show();
+}
+
+void Viewport::sendTextFromDialog(const std::string& text, void *data)
+{
+  Viewport *self = (Viewport *)data;
+
+  if (!core::isValidUTF8(text.c_str(), text.size())) {
+    fl_alert("%s", _("Invalid UTF-8 sequence in text input"));
+    return;
+  }
+
+  self->sendTextStrokes(core::convertLF(text.c_str(), text.size()));
 }
 
 void Viewport::resetKeyboard()
 {
-  stopClipboardStrokes();
+  stopTextStrokes();
 
   try {
     cc->releaseAllKeys();
@@ -1294,7 +1309,7 @@ void Viewport::updateKeyMappingState()
 void Viewport::handleKeyPress(int systemKeyCode,
                               uint32_t keyCode, uint32_t keySym)
 {
-  stopClipboardStrokes();
+  stopTextStrokes();
 
   // System-generated key repeat (the key is already pressed). Forward
   // every other repeat to the host so that its effective repeat rate is
@@ -1446,9 +1461,8 @@ void Viewport::initContextMenu()
   fltk_menu_add(contextMenu, C_("ContextMenu|", "Send Ctrl-Alt-&Del"),
                 0, nullptr, (void*)ID_CTRLALTDEL, 0);
 
-  fltk_menu_add(contextMenu, C_("ContextMenu|",
-                                "&Send strokes from clipboard"),
-                0, nullptr, (void*)ID_SENDCLIPBOARD,
+  fltk_menu_add(contextMenu, C_("ContextMenu|", "Send &text"),
+                0, nullptr, (void*)ID_SENDTEXT,
                 (viewOnly ? FL_MENU_INACTIVE : 0) | FL_MENU_DIVIDER);
 
   fltk_menu_add(contextMenu, C_("ContextMenu|", "&Refresh screen"),
@@ -1565,19 +1579,13 @@ void Viewport::executeMenuAction(int id, bool toggleValue)
     sendKeyRelease(FAKE_ALT_KEY_CODE);
     sendKeyRelease(FAKE_CTRL_KEY_CODE);
     break;
-  case ID_SENDCLIPBOARD:
+  case ID_SENDTEXT:
     if (viewOnly)
       break;
-    if (strokeSending) {
-      stopClipboardStrokes();
-      break;
-    }
-    if (!Fl::clipboard_contains(Fl::clipboard_plain_text)) {
-      vlog.debug("No plain text in local clipboard, ignoring");
-      break;
-    }
-    strokeRequestPending = true;
-    Fl::paste(*this, 1);
+    // Ongoing strokes must stop or they would keep typing whilst the
+    // dialog has the focus
+    stopTextStrokes();
+    showSendTextDialog();
     break;
   case ID_REFRESH:
     cc->refreshFramebuffer();
@@ -1627,9 +1635,8 @@ void Viewport::popupNativeContextMenu()
 
   UINT scFlags = MF_STRING;
   if (viewOnly) scFlags |= MF_GRAYED;
-  AppendMenuW(hMenu, scFlags, ID_SENDCLIPBOARD,
-              utf8_to_wstring(C_("ContextMenu|",
-                                 "&Send strokes from clipboard")).c_str());
+  AppendMenuW(hMenu, scFlags, ID_SENDTEXT,
+              utf8_to_wstring(C_("ContextMenu|", "Send &text")).c_str());
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
   
   AppendMenuW(hMenu, MF_STRING, ID_REFRESH, utf8_to_wstring(C_("ContextMenu|", "&Refresh screen")).c_str());

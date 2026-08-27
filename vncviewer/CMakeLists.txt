@@ -19,6 +19,7 @@ add_executable(vncviewer
   ShortcutHandler.cxx
   Surface.cxx
   OptionsDialog.cxx
+  SendTextDialog.cxx
   PlatformPixelBuffer.cxx
   Viewport.cxx
   parameters.cxx
