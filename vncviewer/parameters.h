@@ -40,6 +40,9 @@ extern core::EnumParameter cursorType;
 
 extern core::StringParameter passwordFile;
 
+extern core::StringParameter userName;
+extern core::BoolParameter openSshTerminal;
+
 extern core::BoolParameter autoSelect;
 extern core::BoolParameter fullColour;
 extern core::AliasParameter fullColourAlias;

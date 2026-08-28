@@ -27,6 +27,8 @@
 
 class Fl_Widget;
 class Fl_Input_Choice;
+class Fl_Input;
+class Fl_Check_Button;
 
 class ServerDialog : public Fl_Window {
 protected:
@@ -49,11 +51,15 @@ private:
   void saveServerHistory();
   void updateUsedDir(const char* filename);
 
+  static void launchSshTerminal(const char* username, const char* servername);
+
   static void onServerHistoryRemove(Fl_Widget*, std::string s, void* data);
   static std::string serverHistoryNormalize(const std::string s);
 
 protected:
   Fl_Suggestion_Input *serverName;
+  Fl_Input *userName;
+  Fl_Check_Button *sshCheck;
   std::list<std::string> serverHistory;
   std::string usedDir;
 };

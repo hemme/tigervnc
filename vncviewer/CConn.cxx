@@ -385,6 +385,8 @@ void CConn::getUserPasswd(bool secure, std::string *user,
   }
 
   AuthDialog d(secure, user != nullptr, password != nullptr);
+  if (user)
+    d.setUsername(userName.getValueStr());
   d.show();
   while (d.shown())
     Fl::wait();

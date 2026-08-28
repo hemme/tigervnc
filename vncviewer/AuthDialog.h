@@ -38,6 +38,8 @@ public:
 
   int result();
 
+  void setUsername(const std::string& user);
+
   std::string getUser();
   std::string getPassword();
   bool getKeepPassword();

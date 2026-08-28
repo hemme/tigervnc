@@ -25,6 +25,10 @@
 #include <algorithm>
 #include <libgen.h>
 
+#ifndef WIN32
+#include <unistd.h>
+#endif
+
 // FIXME: Workaround for FLTK including windows.h
 #ifdef WIN32
 #include <winsock2.h>
@@ -35,8 +39,10 @@
 #include <FL/Fl_Input_Choice.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Return_Button.H>
+#include <FL/Fl_Check_Button.H>
 #include <FL/fl_draw.H>
 #include <FL/fl_ask.H>
+#include <FL/fl_utf8.h>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_File_Chooser.H>
 
@@ -77,6 +83,19 @@ ServerDialog::ServerDialog()
   serverName->call_to_normalize(serverHistoryNormalize);
 
   y += INPUT_HEIGHT + INNER_MARGIN;
+
+  userName = new Fl_Input(
+    LBLLEFT(x, y, w() - OUTER_MARGIN*2, INPUT_HEIGHT, _("Username:"))
+  );
+
+  y += INPUT_HEIGHT + INNER_MARGIN;
+
+  sshCheck = new Fl_Check_Button(
+    LBLRIGHT(x, y, CHECK_MIN_WIDTH, CHECK_HEIGHT,
+             _("Open an SSH terminal to the server"))
+  );
+
+  y += CHECK_HEIGHT + INNER_MARGIN;
 
   x2 = x;
 
@@ -135,6 +154,8 @@ void ServerDialog::run(const char* servername, char *newservername)
   ServerDialog dialog;
 
   dialog.serverName->value(servername);
+  dialog.userName->value(::userName);
+  dialog.sshCheck->value(::openSshTerminal ? 1 : 0);
 
   dialog.show();
 
@@ -287,6 +308,9 @@ void ServerDialog::handleConnect(Fl_Widget* /*widget*/, void *data)
   ServerDialog *dialog = (ServerDialog*)data;
   const char* servername = dialog->serverName->value();
 
+  ::userName.setParam(dialog->userName->value());
+  ::openSshTerminal.setParam(dialog->sshCheck->value() != 0);
+
   dialog->hide();
 
   try {
@@ -305,6 +329,86 @@ void ServerDialog::handleConnect(Fl_Widget* /*widget*/, void *data)
   } catch (std::exception& e) {
     vlog.error(_("Unable to save the server history: %s"), e.what());
   }
+
+  if (dialog->sshCheck->value())
+    launchSshTerminal(dialog->userName->value(), servername);
+}
+
+
+void ServerDialog::launchSshTerminal(const char* username,
+                                     const char* servername)
+{
+  if ((servername == nullptr) || (servername[0] == '\0'))
+    return;
+
+  // The server name might include a port ("host:display" or
+  // "host::port"), but SSH only wants the host part
+  std::string host = servername;
+  try {
+    std::string parsedHost;
+    int port;
+
+    network::getHostAndPort(servername, &parsedHost, &port);
+    if (!parsedHost.empty())
+      host = parsedHost;
+  } catch (std::exception&) {
+    // Not a parseable host name, use it verbatim instead
+  }
+
+  std::string target = host;
+  if ((username != nullptr) && (username[0] != '\0'))
+    target = std::string(username) + "@" + host;
+
+#ifdef WIN32
+  // "/k" keeps the console open after ssh exits so that the command
+  // can be run again
+  std::string cmdline = "cmd.exe /k ssh " + target;
+
+  const size_t buffersize = 512;
+  wchar_t wcmdline[buffersize];
+  unsigned len = fl_utf8towc(cmdline.c_str(), cmdline.size() + 1,
+                             wcmdline, buffersize);
+  if (len >= buffersize) {
+    vlog.error(_("Failed to open SSH terminal: Command line too long"));
+    return;
+  }
+
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  memset(&pi, 0, sizeof(pi));
+
+  if (!CreateProcessW(nullptr, wcmdline, nullptr, nullptr, FALSE,
+                      CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
+    vlog.error(_("Failed to open SSH terminal: CreateProcessW error %ld"),
+               (long)GetLastError());
+    return;
+  }
+
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+#else
+  // Try the common terminal emulators until one of them works
+  const char* terminals[] = { "x-terminal-emulator", "gnome-terminal",
+                              "konsole", "xterm", nullptr };
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    vlog.error(_("Failed to open SSH terminal: %s"), strerror(errno));
+    return;
+  }
+
+  if (pid != 0)
+    return;
+
+  for (int i = 0; terminals[i] != nullptr; i++)
+    execlp(terminals[i], terminals[i], "-e", "ssh", target.c_str(),
+           (char*)nullptr);
+
+  _exit(1);
+#endif
 }
 
 

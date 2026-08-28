@@ -107,6 +107,17 @@ core::StringParameter
 core::AliasParameter
   passwd("passwd", &passwordFile);
 
+core::StringParameter
+  userName("UserName",
+           _("Username to pre-fill in the authentication dialog and to "
+             "use for the SSH terminal"),
+           "");
+core::BoolParameter
+  openSshTerminal("OpenSshTerminal",
+                  _("Open a system terminal with an SSH connection to "
+                    "the server when connecting"),
+                  false);
+
 core::BoolParameter
   autoSelect("AutoSelect",
              _("Auto select pixel format and encoding"),
@@ -288,6 +299,8 @@ static core::VoidParameter* parameterArray[] = {
   &reconnectOnError,
   &shared,
   &rememberSettingsOnDisconnect,
+  &userName,
+  &openSshTerminal,
   /* Compression */
   &autoSelect,
   &fullColour,
