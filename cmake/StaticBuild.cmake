@@ -77,6 +77,8 @@ if(BUILD_STATIC)
       HINTS ${PC_GNUTLS_LIBDIR} ${PC_GNUTLS_LIBRARY_DIRS})
     FIND_LIBRARY(ZSTD_LIBRARY NAMES zstd libzstd
       HINTS ${PC_GNUTLS_LIBDIR} ${PC_GNUTLS_LIBRARY_DIRS})
+    FIND_LIBRARY(BROTLI_LIBRARY NAMES brotlienc libbrotlienc
+      HINTS ${PC_GNUTLS_LIBDIR} ${PC_GNUTLS_LIBRARY_DIRS})
 
     set(GNUTLS_LIBRARIES "-Wl,-Bstatic -lgnutls")
 
@@ -92,6 +94,9 @@ if(BUILD_STATIC)
     if(ZSTD_LIBRARY)
       set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -lzstd")
     endif()
+    if(BROTLI_LIBRARY)
+      set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -lbrotlienc -lbrotlidec -lbrotlicommon")
+    endif()
 
     set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -Wl,-Bdynamic")
 
@@ -106,12 +111,14 @@ if(BUILD_STATIC)
       # And sockets
       set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -lws2_32")
 
-      # p11-kit only available as dynamic library for MSYS2 on Windows and dynamic linking of unistring is required
+      # p11-kit only available as dynamic library for MSYS2 on Windows
       if(P11KIT_LIBRARY)
         set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -lp11-kit")
       endif()
       if(UNISTRING_LIBRARY)
-        set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -lunistring")
+        # Keep it static like the Intl group so that the process ends
+        # up with just one copy of the library
+        set(GNUTLS_LIBRARIES "${GNUTLS_LIBRARIES} -Wl,-Bstatic -lunistring -Wl,-Bdynamic")
       endif()
     endif()
 
@@ -182,6 +189,13 @@ endif()
 if(BUILD_STATIC_GCC)
   set(CMAKE_C_LINK_EXECUTABLE "${CMAKE_C_LINK_EXECUTABLE} -static-libgcc")
   set(CMAKE_CXX_LINK_EXECUTABLE "${CMAKE_CXX_LINK_EXECUTABLE} -static-libstdc++ -static-libgcc")
+  if(WIN32)
+    # MinGW's posix thread support keeps a dynamic dependency on
+    # libwinpthread-1.dll even with -static-libstdc++, so we have to
+    # explicitly request the static variant
+    set(CMAKE_C_LINK_EXECUTABLE "${CMAKE_C_LINK_EXECUTABLE} -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic")
+    set(CMAKE_CXX_LINK_EXECUTABLE "${CMAKE_CXX_LINK_EXECUTABLE} -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic")
+  endif()
   if(ENABLE_ASAN)
     set(CMAKE_C_LINK_EXECUTABLE "${CMAKE_C_LINK_EXECUTABLE} -static-libasan")
     set(CMAKE_CXX_LINK_EXECUTABLE "${CMAKE_CXX_LINK_EXECUTABLE} -static-libasan")
